@@ -1,6 +1,16 @@
 
 # Changelog
 
+
+## 2.2.0 — Admin Features, Analytics, Automation
+- Add analytics dashboard for model usage and comparison
+- Add batch scan & chat (admin panel)
+- Add feedback & labeling UI for scan/chat results
+- Add export options for interactions, feedback, analytics
+- Add retrain & deploy automation (admin panel button)
+- Improve response formatting and explanations (model provenance, confidence scores)
+- Update documentation and troubleshooting sections
+
 ## 2.1.0 — Advanced LLM Ensemble & Web UI
 - Add ensemble support for multiple LLMs (DistilBERT, RoBERTa, DistilGPT2, GPT2)
 - Sentiment analysis: majority vote, average score, all model outputs
