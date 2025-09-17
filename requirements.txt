@@ -1,0 +1,5 @@
+nltk
+rapidfuzz
+filelock
+numpy
+setuptools

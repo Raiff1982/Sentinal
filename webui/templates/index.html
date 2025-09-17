@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Sentinal Hoax/Misinformation Scanner</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 600px; margin: auto; }
+        .result { margin-top: 20px; padding: 10px; border: 1px solid #ccc; background: #f9f9f9; }
+        button { padding: 8px 16px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Sentinal Hoax/Misinformation Scanner</h1>
+        <form id="scanForm" enctype="multipart/form-data">
+            <label for="text">Enter text to scan:</label><br>
+            <textarea id="text" name="text" rows="6" cols="60"></textarea><br><br>
+            <label for="file">Or upload a text file:</label><br>
+            <input type="file" id="file" name="file" accept=".txt"><br><br>
+            <button type="submit">Scan</button>
+        </form>
+        <div id="result" class="result" style="display:none;"></div>
+        <hr>
+        <h2>Chat Interface</h2>
+        <form id="chatForm">
+            <input type="text" id="chatInput" name="chatInput" placeholder="Type your message..." style="width:80%;">
+            <button type="submit">Send</button>
+        </form>
+        <div id="chatHistory" class="result" style="margin-top:10px;"></div>
+    </div>
+    <script>
+        document.getElementById('scanForm').onsubmit = async function(e) {
+            e.preventDefault();
+            const text = document.getElementById('text').value;
+            const fileInput = document.getElementById('file');
+            const formData = new FormData();
+            formData.append('text', text);
+            if (fileInput.files.length > 0) {
+                formData.append('file', fileInput.files[0]);
+            }
+            const res = await fetch('/scan', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await res.json();
+            document.getElementById('result').style.display = 'block';
+            document.getElementById('result').innerHTML =
+                `<b>Red Flag Hits:</b> ${data.red_flag_hits}<br>` +
+                `<b>Source Score:</b> ${data.source_score}<br>` +
+                `<b>Verdict:</b> ${data.verdict}`;
+            if (data.chat_history) {
+                updateChatHistory(data.chat_history);
+            }
+        };
+
+        document.getElementById('chatForm').onsubmit = async function(e) {
+            e.preventDefault();
+            const chatInput = document.getElementById('chatInput').value;
+            const res = await fetch('/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'text=' + encodeURIComponent(chatInput)
+            });
+            const data = await res.json();
+            if (data.chat_history) {
+                updateChatHistory(data.chat_history);
+            }
+            document.getElementById('chatInput').value = '';
+        };
+
+        function updateChatHistory(history) {
+            let html = '';
+            for (const entry of history) {
+                html += `<div><b>You:</b> ${entry.user}<br><b>Verdict:</b> ${entry.result}</div><hr>`;
+            }
+            document.getElementById('chatHistory').innerHTML = html;
+        }
+    </script>
+</body>
+</html>
