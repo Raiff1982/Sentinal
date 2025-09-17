@@ -13,11 +13,16 @@
     <div class="container">
         <h1>Admin Dashboard</h1>
         <p>Welcome, {{ user }}! Here you can access admin-only features.</p>
-        <ul>
-            <li><a href="/admin/users">Manage Users</a></li>
-            <li><a href="/admin/logs">View Logs</a></li>
-            <li><a href="/">Back to Main</a></li>
-        </ul>
+            <ul>
+                <li><a href="/admin/users">Manage Users</a></li>
+                <li><a href="/admin/logs">View Logs</a></li>
+                <li><a href="/admin/analytics">Model Analytics</a></li>
+                <li><a href="/admin/batch">Batch Scan & Chat</a></li>
+                <li><a href="/admin/feedback">Feedback & Labeling</a></li>
+                <li><a href="/admin/export">Export Data</a></li>
+                <li><form id="retrainForm" action="/admin/retrain" method="post" style="display:inline;"><button type="submit">Retrain & Deploy Models</button></form></li>
+                <li><a href="/">Back to Main</a></li>
+            </ul>
         <hr>
         <h2>Advanced LLM Integration</h2>
         <p>The system now supports multiple AI models and LLMs for ensemble analysis and richer chat responses. You can configure model selection in <code>sentinal/ai_base.py</code>.<br>

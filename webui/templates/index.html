@@ -77,11 +77,16 @@
                 }
                 aiHtml += `</ul><b>Majority Label:</b> ${data.ai_result[0].label} (<b>Avg Score:</b> ${data.ai_result[0].score.toFixed(2)})<br>`;
             }
+            let explanationHtml = '';
+            if (data.explanation) {
+                explanationHtml = `<b>Explanation:</b> ${data.explanation}<br>`;
+            }
             document.getElementById('result').innerHTML =
                 aiHtml +
                 `<b>Red Flag Hits:</b> ${data.red_flag_hits}<br>` +
                 `<b>Source Score:</b> ${data.source_score}<br>` +
-                `<b>Verdict:</b> ${data.verdict}`;
+                `<b>Verdict:</b> ${data.verdict}<br>` +
+                explanationHtml;
             if (data.chat_history) {
                 updateChatHistory(data.chat_history);
             }
@@ -125,7 +130,11 @@
                         llmHtml = `<b>LLM Response:</b> ${entry.llm}<br>`;
                     }
                 }
-                html += `<div><b>You:</b> ${entry.user}<br>${aiHtml}${llmHtml}<b>Verdict:</b> ${entry.result}</div><hr>`;
+                let explanationHtml = '';
+                if (entry.explanation) {
+                    explanationHtml = `<b>Explanation:</b> ${entry.explanation}<br>`;
+                }
+                html += `<div><b>You:</b> ${entry.user}<br>${aiHtml}${llmHtml}<b>Verdict:</b> ${entry.result}<br>${explanationHtml}</div><hr>`;
             }
             document.getElementById('chatHistory').innerHTML = html;
         }

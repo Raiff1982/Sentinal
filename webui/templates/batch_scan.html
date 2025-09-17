@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Batch Scan & Chat</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 700px; margin: auto; }
+        textarea, input, select, button { margin: 8px 0; width: 100%; padding: 8px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Batch Scan & Chat</h1>
+        <form id="batchForm">
+            <label for="batchText">Enter multiple texts (one per line):</label>
+            <textarea id="batchText" name="batchText" rows="10"></textarea>
+            <label for="batchModel">Select Model:</label>
+            <select id="batchModel" name="batchModel">
+                <option value="finetuned_llm">Fine-tuned LLM</option>
+                <option value="distilbert-base-uncased">DistilBERT</option>
+                <option value="roberta-base">RoBERTa</option>
+                <option value="codette_cocoon_model">Codette Cocoon</option>
+                <option value="distilgpt2">DistilGPT2</option>
+                <option value="gpt2">GPT2</option>
+            </select>
+            <button type="submit">Run Batch</button>
+        </form>
+        <div id="batchResults" class="result"></div>
+        <a href="/admin/dashboard">Back to Dashboard</a>
+    </div>
+    <script>
+        document.getElementById('batchForm').onsubmit = async function(e) {
+            e.preventDefault();
+            const texts = document.getElementById('batchText').value.split('\n').filter(t => t.trim());
+            const model = document.getElementById('batchModel').value;
+            const res = await fetch('/admin/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ texts, model })
+            });
+            const data = await res.json();
+            let html = '<h3>Results</h3>';
+            data.results.forEach((r, i) => {
+                html += `<div><b>Input:</b> ${texts[i]}<br><b>Scan:</b> ${r.scan}<br><b>Chat:</b> ${r.chat}<br><b>Explanation:</b> ${r.explanation}</div><hr>`;
+            });
+            document.getElementById('batchResults').innerHTML = html;
+        };
+    </script>
+</body>
+</html>

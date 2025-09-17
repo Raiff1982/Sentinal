@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Export Data</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 700px; margin: auto; }
+        button { margin: 8px 0; padding: 8px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Export Data</h1>
+        <form method="get" action="/admin/export?type=interactions">
+            <button type="submit">Download Interactions (JSONL)</button>
+        </form>
+        <form method="get" action="/admin/export?type=feedback">
+            <button type="submit">Download Feedback Labels (JSONL)</button>
+        </form>
+        <form method="get" action="/admin/export?type=analytics">
+            <button type="submit">Download Analytics (JSON)</button>
+        </form>
+        <a href="/admin/dashboard">Back to Dashboard</a>
+    </div>
+</body>
+</html>

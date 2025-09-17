@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Model Analytics</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 700px; margin: auto; }
+        canvas { margin-top: 30px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Model Usage Analytics</h1>
+        <p>Compare scan and chat usage across models. Data updates live as users interact.</p>
+        <canvas id="scanChart" width="600" height="300"></canvas>
+        <canvas id="chatChart" width="600" height="300"></canvas>
+        <a href="/admin/dashboard">Back to Dashboard</a>
+    </div>
+    <script>
+        async function fetchAnalytics() {
+            const res = await fetch('/admin/analytics_data');
+            return await res.json();
+        }
+        fetchAnalytics().then(data => {
+            const scanLabels = Object.keys(data.scan);
+            const scanCounts = Object.values(data.scan);
+            const chatLabels = Object.keys(data.chat);
+            const chatCounts = Object.values(data.chat);
+            new Chart(document.getElementById('scanChart'), {
+                type: 'bar',
+                data: {
+                    labels: scanLabels,
+                    datasets: [{ label: 'Scan Usage', data: scanCounts, backgroundColor: '#4e79a7' }]
+                }
+            });
+            new Chart(document.getElementById('chatChart'), {
+                type: 'bar',
+                data: {
+                    labels: chatLabels,
+                    datasets: [{ label: 'Chat Usage', data: chatCounts, backgroundColor: '#f28e2b' }]
+                }
+            });
+        });
+    </script>
+</body>
+</html>

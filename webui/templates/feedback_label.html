@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Feedback & Labeling</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 700px; margin: auto; }
+        textarea, input, select, button { margin: 8px 0; width: 100%; padding: 8px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Feedback & Labeling</h1>
+        <form id="feedbackForm">
+            <label for="feedbackText">Paste scan/chat result to label:</label>
+            <textarea id="feedbackText" name="feedbackText" rows="6"></textarea>
+            <label for="label">Label:</label>
+            <select id="label" name="label">
+                <option value="REAL">REAL</option>
+                <option value="HOAX">HOAX</option>
+                <option value="CORRECT">CORRECT</option>
+                <option value="INCORRECT">INCORRECT</option>
+            </select>
+            <button type="submit">Submit Feedback</button>
+        </form>
+        <div id="feedbackResult" class="result"></div>
+        <a href="/admin/dashboard">Back to Dashboard</a>
+    </div>
+    <script>
+        document.getElementById('feedbackForm').onsubmit = async function(e) {
+            e.preventDefault();
+            const text = document.getElementById('feedbackText').value;
+            const label = document.getElementById('label').value;
+            const res = await fetch('/admin/feedback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text, label })
+            });
+            const data = await res.json();
+            document.getElementById('feedbackResult').innerHTML = `<b>Status:</b> ${data.status}`;
+        };
+    </script>
+</body>
+</html>
