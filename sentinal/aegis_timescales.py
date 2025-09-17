@@ -1,6 +1,10 @@
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-	from .aegis_timescales import AegisAgent, NexusMemory
+	from .aegis_timescales import AegisAgent, NexusMemory, MetaJudgeAgent, TimeScaleCoordinator
+
+# Forward declarations for type checking and runtime references
+class MetaJudgeAgent: pass
+class TimeScaleCoordinator: pass
 from typing import Dict, Any, List, Optional, Tuple, Deque
 from abc import ABC, abstractmethod
 
