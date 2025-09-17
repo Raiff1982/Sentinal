@@ -2,17 +2,19 @@
 # SENTINAL
 
 A multi-timescale AI guardrails system for misinformation detection and filtering, now with:
-- Open-source LLM (DistilGPT2) for natural chat
-- Sentiment analysis (DistilBERT)
-- Web UI with chat and file upload
+- Advanced LLM ensemble integration (DistilBERT, RoBERTa, DistilGPT2, GPT2)
+- Sentiment analysis: majority vote, average score, all model outputs
+- Chat: show all LLM responses
+- Web UI with chat, file upload, and admin/user authentication
+- Admin dashboard: user management, logs, documentation links
 
 ## Features
 - Hoax/misinformation detection
 - Allow/deny lists
 - CLI for scanning text and sources
-- Web UI with chat and file upload
-- Open-source LLM (DistilGPT2) for natural chat
-- Sentiment analysis (DistilBERT)
+- Web UI with chat, file upload, and ensemble LLMs
+- Open-source LLMs for natural chat
+- Sentiment analysis with multiple models
 - SQLite-based memory and FTS5 search
 - NLTK, rapidfuzz, numpy, filelock integration
 - Extensible signal engine

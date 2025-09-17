@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Manage Users</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 600px; margin: auto; }
+        .result { margin-top: 20px; padding: 10px; border: 1px solid #ccc; background: #ffe0e0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Manage Users</h1>
+        <p>Admin-only user management panel.</p>
+        <ul>
+            <li>Feature: List, add, or remove users (coming soon)</li>
+            <li><a href="/admin/dashboard">Back to Dashboard</a></li>
+        </ul>
+        <hr>
+        <h2>User Management Docs</h2>
+        <p>Users are currently managed in-memory in <code>webui/auth.py</code> for demo purposes.<br>
+        To persist users, integrate a database and update registration/login logic.<br>
+        <b>Roles:</b> Each user has a role ('admin' or 'user') for feature access.<br>
+        <b>To add/remove users:</b> Edit the <code>users</code> dictionary in <code>auth.py</code> or implement database-backed CRUD operations.</p>
+    </div>
+</body>
+</html>

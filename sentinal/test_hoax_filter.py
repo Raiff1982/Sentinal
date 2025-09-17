@@ -2,8 +2,8 @@
 import os
 import unittest
 import nltk
-from .hoax_filter import HoaxFilter
-from .nexis_signal_engine import NexisSignalEngine
+from sentinal.hoax_filter import HoaxFilter
+from sentinal.nexis_signal_engine import NexisSignalEngine
 
 # Ensure NLTK data is present
 try:
@@ -22,6 +22,32 @@ SATURN_POST = (
 )
 
 class TestHoaxFilter(unittest.TestCase):
+    def test_no_red_flags(self):
+        text = "NASA confirms water on Mars."
+        r = self.hf.score(text, url="https://nasa.gov", context_keywords=["mars", "water"])
+        self.assertEqual(r.red_flag_hits, 0)
+        self.assertLess(r.combined, 0.5)
+
+    def test_medium_risk_source(self):
+        text = "Shocking discovery in space!"
+        r = self.hf.score(text, url="https://dailymail.co.uk", context_keywords=["space"])
+        self.assertGreaterEqual(r.red_flag_hits, 1)
+        self.assertGreaterEqual(r.source_score, 0.7)
+
+    def test_large_scale_claim(self):
+        text = "A 10,000 kilometer long object was seen near Jupiter."
+        r = self.hf.score(text, url="https://arxiv.org", context_keywords=["jupiter"])
+        self.assertGreaterEqual(r.scale_score, 0.9)
+
+    def test_social_media_source(self):
+        text = "Explosive viral video shows UFO near Saturn."
+        r = self.hf.score(text, url="https://twitter.com", context_keywords=["saturn", "ufo"])
+        self.assertGreaterEqual(r.source_score, 0.85)
+
+    def test_empty_text(self):
+        r = self.hf.score("", url=None)
+        self.assertEqual(r.red_flag_hits, 0)
+        self.assertLess(r.combined, 0.5)
     def setUp(self):
         self.hf = HoaxFilter()
 

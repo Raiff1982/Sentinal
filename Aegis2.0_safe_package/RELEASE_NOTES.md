@@ -1,5 +1,26 @@
 # Project SENTINAL v2.0 Release Notes
 
+## 2.1.0 (2025-09-17)
+
+### Overview
+This release adds advanced LLM ensemble integration and a role-based web UI with admin/user authentication.
+
+### New Features
+- Ensemble support for multiple LLMs (DistilBERT, RoBERTa, DistilGPT2, GPT2)
+- Sentiment analysis: majority vote, average score, all model outputs
+- Chat: show all LLM responses
+- Refactor `ai_base.py` for easy model extension
+- Web UI: display ensemble results and all LLM outputs
+- Admin/user authentication and role-based feature restriction
+- Admin dashboard: user management, logs, documentation links
+
+### Upgrade Notes
+- Update requirements.txt to include `transformers` and `torch`
+- See README.md and admin dashboard for documentation links
+
+### Security
+- No changes to security model; see v2.0 notes
+
 **Date:** 2025-08-18
 
 ## Overview

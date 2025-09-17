@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Admin Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 600px; margin: auto; }
+        .result { margin-top: 20px; padding: 10px; border: 1px solid #ccc; background: #ffe0e0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Admin Dashboard</h1>
+        <p>Welcome, {{ user }}! Here you can access admin-only features.</p>
+        <ul>
+            <li><a href="/admin/users">Manage Users</a></li>
+            <li><a href="/admin/logs">View Logs</a></li>
+            <li><a href="/">Back to Main</a></li>
+        </ul>
+        <hr>
+        <h2>Advanced LLM Integration</h2>
+        <p>The system now supports multiple AI models and LLMs for ensemble analysis and richer chat responses. You can configure model selection in <code>sentinal/ai_base.py</code>.<br>
+        <b>Current Models:</b>
+        <ul>
+            <li>Sentiment: distilbert-base-uncased, roberta-base</li>
+            <li>LLM: distilgpt2, gpt2</li>
+        </ul>
+        <b>How it works:</b> Sentiment analysis uses an ensemble (majority vote, average score). Chat responses show outputs from all configured LLMs.<br>
+        <b>To add models:</b> Edit <code>AIBase</code> in <code>sentinal/ai_base.py</code> and update <code>requirements.txt</code> as needed.
+        </p>
+        <hr>
+        <h2>Documentation</h2>
+        <ul>
+            <li><a href="/static/Project_SENTINAL_Readme.pdf" target="_blank">Project SENTINAL Readme (PDF)</a></li>
+            <li><a href="/static/Aegis_Sentinel_Architecture.pdf" target="_blank">Architecture Overview (PDF)</a></li>
+            <li><a href="/static/RELEASE_NOTES.md" target="_blank">Release Notes (Markdown)</a></li>
+        </ul>
+    </div>
+</body>
+</html>
