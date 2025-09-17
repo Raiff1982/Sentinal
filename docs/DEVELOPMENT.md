@@ -6,9 +6,12 @@
 - Install dependencies: `pip install -r requirements.txt`
 - Install in editable mode: `pip install -e .`
 
+
 ## Adding Features
 - Add new modules to `sentinal/`
 - Write tests in `sentinal/tests/`
+- Add or update AI/LLM models in `sentinal/ai_base.py`
+- Extend the web UI in `webui/`
 - Document changes in `docs/`
 
 ## CI/CD
@@ -17,3 +20,4 @@
 
 ## Packaging
 - Update `setup.py` for new dependencies or entry points
+- Ensure new models and web UI are included

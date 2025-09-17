@@ -18,6 +18,19 @@ result = hf.score("Some text", url="https://example.com")
 print(result)
 ```
 
+
+## Web UI
+Start the web interface:
+```bash
+python webui/app.py
+```
+Open your browser to `http://localhost:5000`.
+
+### Features
+- Enter text or upload a file for scanning
+- Use the chat interface for natural LLM responses
+- See AI sentiment and Sentinal verdicts for each message
+
 ## Testing
 Run all tests:
 ```bash

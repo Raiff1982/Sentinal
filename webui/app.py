@@ -1,10 +1,12 @@
 
 from flask import Flask, render_template, request, jsonify
 from sentinal.hoax_filter import HoaxFilter
+from sentinal.ai_base import AIBase
 import os
 
 app = Flask(__name__)
 hf = HoaxFilter()
+ai = AIBase()
 
 chat_history = []
 
@@ -18,20 +20,30 @@ def scan():
     file = request.files.get('file')
     if file:
         text = file.read().decode('utf-8')
+    ai_result = ai.analyze(text)
     result = hf.score(text)
-    chat_history.append({'user': text, 'result': result.verdict})
+    chat_history.append({'user': text, 'ai': ai_result, 'result': result.verdict})
     return jsonify({
+        'ai_result': ai_result,
         'red_flag_hits': result.red_flag_hits,
         'source_score': result.source_score,
         'verdict': result.verdict,
         'chat_history': chat_history[-10:]  # last 10 exchanges
     })
 
+
 @app.route('/chat', methods=['POST'])
 def chat():
     text = request.form.get('text')
+    ai_result = ai.analyze(text)
+    llm_response = ai.chat(text)
     result = hf.score(text)
-    chat_history.append({'user': text, 'result': result.verdict})
+    chat_history.append({
+        'user': text,
+        'ai': ai_result,
+        'llm': llm_response,
+        'result': result.verdict
+    })
     return jsonify({'chat_history': chat_history[-10:]})
 
 if __name__ == '__main__':

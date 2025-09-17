@@ -1,33 +1,41 @@
 # Project SENTINAL
+# SENTINAL
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.16853922.svg)](https://doi.org/10.5281/zenodo.16853922)
+A multi-timescale AI guardrails system for misinformation detection and filtering, now with:
+- Open-source LLM (DistilGPT2) for natural chat
+- Sentiment analysis (DistilBERT)
+- Web UI with chat and file upload
 
-**AEGIS Sentinel** is the governance & safety cortex for multi‑agent systems:
-- **Shield (pre‑attack)**: rate limiting, proof‑of‑work, injection/Unicode anomaly guard, canaries & honeypots.
-- **Challenge Gate (pre‑flight)**: runs a ChallengeBank on the *real* council; fail ⇒ reject.
-- **Meta‑Arbitration (in‑flight)**: `BLOCK / PROCEED_WITH_CAUTION / PROCEED` from fused risk, stress, conflict, timescale.
-- **Tamper‑Evident Ledger (post‑flight)**: HMAC‑signed JSONL with full verify/rollback.
-- **Nexus Signal Engine**: entropy‑aware, arousal‑weighted, time‑decaying memory.
-
-## Install
-```bash
-pip install -r requirements.txt
-```
+## Features
+- Hoax/misinformation detection
+- Allow/deny lists
+- CLI for scanning text and sources
+- Web UI with chat and file upload
+- Open-source LLM (DistilGPT2) for natural chat
+- Sentiment analysis (DistilBERT)
+- SQLite-based memory and FTS5 search
+- NLTK, rapidfuzz, numpy, filelock integration
+- Extensible signal engine
 
 ## Quickstart
 ```bash
-python -m pytest -q tests
-python aegisctl.py challenges
-python aegisctl.py serve --port 8787
+pip install -e .
+hoax-scan --help
+python webui/app.py  # Start the web UI
 ```
 
-## Cite
-```bibtex
-@software{harrison2025sentinal,
-  author = {Harrison, Jonathan},
-  title  = {Project SENTINAL},
-  year   = {2025},
-  doi    = {10.5281/zenodo.16853922}
-}
+## Project Structure
+- `sentinal/` — Source code and CLI
+- `sentinal/tests/` — Unit tests
+- `webui/` — Flask web UI
+- `docs/` — Documentation
+- `.github/workflows/ci.yml` — CI/CD workflow
+
+## Requirements
+- Python 3.8+
+- See `setup.py` and `requirements.txt`
+
+## License
+MIT
 ```
 

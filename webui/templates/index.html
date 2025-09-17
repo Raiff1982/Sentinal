@@ -45,7 +45,12 @@
             });
             const data = await res.json();
             document.getElementById('result').style.display = 'block';
+            let aiHtml = '';
+            if (data.ai_result) {
+                aiHtml = `<b>AI Model:</b> ${data.ai_result[0].label} (${data.ai_result[0].score.toFixed(2)})<br>`;
+            }
             document.getElementById('result').innerHTML =
+                aiHtml +
                 `<b>Red Flag Hits:</b> ${data.red_flag_hits}<br>` +
                 `<b>Source Score:</b> ${data.source_score}<br>` +
                 `<b>Verdict:</b> ${data.verdict}`;
@@ -72,7 +77,15 @@
         function updateChatHistory(history) {
             let html = '';
             for (const entry of history) {
-                html += `<div><b>You:</b> ${entry.user}<br><b>Verdict:</b> ${entry.result}</div><hr>`;
+                let aiHtml = '';
+                if (entry.ai && entry.ai.length > 0) {
+                    aiHtml = `<b>AI Model:</b> ${entry.ai[0].label} (${entry.ai[0].score.toFixed(2)})<br>`;
+                }
+                let llmHtml = '';
+                if (entry.llm) {
+                    llmHtml = `<b>LLM Response:</b> ${entry.llm}<br>`;
+                }
+                html += `<div><b>You:</b> ${entry.user}<br>${aiHtml}${llmHtml}<b>Verdict:</b> ${entry.result}</div><hr>`;
             }
             document.getElementById('chatHistory').innerHTML = html;
         }
