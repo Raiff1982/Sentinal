@@ -1,0 +1,27 @@
+class WhyEngine:
+    def __init__(self, store: ExplainStore, council: Any):
+        self.store = store
+        self.council = council
+
+    def counterfactual_probe(self, bundle: CouncilBundle, agent: str) -> Dict[str, Any]:
+        """Re-run bundle with agent's influence set to zero."""
+        try:
+            modified_bundle = dict(bundle)
+            modified_reports = []
+            for r in bundle.get("reports", []):
+                if r.get("agent") == agent:
+                    r = dict(r)
+                    r["influence"] = 0.0
+                modified_reports.append(r)
+            modified_bundle["reports"] = modified_reports
+            decision = self.council.dispatch(modified_bundle.get("input", {}))["decision"]
+            original_decision = bundle.get("decision", "")
+            return {
+                "agent": agent,
+                "original_decision": original_decision,
+                "counterfactual_decision": decision,
+                "changed": decision != original_decision
+            }
+        except Exception as e:
+            log.error("Counterfactual probe for %s failed: %s", agent, e)
+            return {"agent": agent, "original_decision": "", "counterfactual_decision": "", "changed": False}

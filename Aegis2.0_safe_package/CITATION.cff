@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+title: "Project SENTINAL v2.0 (Aegis Sentinel with Nexus Signal Engine)"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: "Harrison"
+    given-names: "Jonathan"
+    orcid: "https://orcid.org/0009-0003-7005-8187"
+repository-code: "https://github.com/Raiff1982/codette-TheDaytheDreamBecameReal"
+license: "CC-BY-4.0"
+doi: "10.5281/zenodo.16894912"
+date-released: "2025-08-18"
+version: "2.0"

@@ -1,0 +1,28 @@
+rich
+hypothesis
+pytest
+portalocker
+jsonschema
+scipy
+threading  # Built-in, but listed for completeness
+queue  # Built-in
+heapq  # Built-in
+xxhash
+unicodedata  # Built-in
+re  # Built-in
+json  # Built-in
+os  # Built-in
+logging  # Built-in
+math  # Built-in
+statistics  # Built-in
+random  # Built-in
+time  # Built-in
+datetime  # Built-in
+secrets  # Built-in
+hmac  # Built-in
+hashlib  # Built-in
+concurrent.futures  # Built-in
+abc  # Built-in
+collections  # Built-in
+typing  # Built-in
+click  # For playground CLI

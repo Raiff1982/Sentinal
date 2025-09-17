@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it.
+title: Project SENTINAL
+authors:
+  - family-names: Harrison
+    given-names: Jonathan
+doi: 10.5281/zenodo.16853922
+date-released: 2025-08-13
+version: 2.0.0
+repository-code: https://doi.org/10.5281/zenodo.16853922
+preferred-citation:
+  type: software
+  authors:
+    - family-names: Harrison
+      given-names: Jonathan
+  title: Project SENTINAL
+  year: 2025
+  doi: 10.5281/zenodo.16853922

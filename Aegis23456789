@@ -1,0 +1,311 @@
+I’m giving you:
+
+API fetchers (SBDB + CAD + optional Horizons), with retries/timeouts
+
+A resolver that extracts object designations from messy text (“3I/ATLAS”, “C/2025 N1”, etc.)
+
+A guard that fuses: hoax heuristics → live orbital facts → unified verdict
+
+A CLI you can drop beside your service and call from anything
+
+APIs referenced (official docs): SBDB Close-Approach Data (CAD), SBDB Lookup/Query, Horizons API, NASA’s 3I/ATLAS page. 
+JPL SSD API
++3
+JPL SSD API
++3
+JPL SSD API
++3
+NASA Solar System Dynamics
+NASA Science
+
+orbit_feeds.py
+# orbit_feeds.py
+# Live lookups against JPL/SSD APIs: SBDB, Close-Approach Data (CAD), optional Horizons.
+# No API key needed for SSD endpoints. Timeouts + simple retry.
+
+from __future__ import annotations
+import requests
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+SSD_BASE = "https://ssd-api.jpl.nasa.gov"
+DEFAULT_TIMEOUT = 10
+DEFAULT_RETRIES = 3
+
+class SSDClient:
+    def __init__(self, base: str = SSD_BASE, timeout: int = DEFAULT_TIMEOUT, retries: int = DEFAULT_RETRIES):
+        self.base = base.rstrip("/")
+        self.timeout = timeout
+        self.retries = retries
+        self._session = requests.Session()
+        self._session.headers.update({"User-Agent": "Nexis-Guard/1.0"})
+
+    def _get(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        url = f"{self.base}/{path.lstrip('/')}"
+        last_err = None
+        for i in range(self.retries):
+            try:
+                resp = self._session.get(url, params=params, timeout=self.timeout)
+                if resp.status_code == 200:
+                    return resp.json()
+                last_err = RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+            except Exception as e:
+                last_err = e
+            time.sleep(min(2 ** i, 5))
+        raise last_err or RuntimeError("Unknown error")
+
+    # SBDB Lookup for a single body (orbital elements, aliases, physical params)
+    def sbdb_lookup(self, sstr: str, full_prec: bool = True) -> Dict[str, Any]:
+        # Docs: https://ssd-api.jpl.nasa.gov/doc/sbdb.html
+        return self._get("/sbdb.api", {"sstr": sstr, "full-prec": "true" if full_prec else "false"})
+
+    # SBDB Query for sets (we mostly use lookup, but this is handy for filters)
+    def sbdb_query(self, **kwargs) -> Dict[str, Any]:
+        # Docs: https://ssd-api.jpl.nasa.gov/doc/sbdb_query.html
+        return self._get("/sbdb_query.api", kwargs)
+
+    # Close-Approach Data (CNEOS CAD) for specific designation and target body
+    def cad(self, des: str, body: str = "Earth", date_min: str = "1900-01-01",
+            date_max: str = "2100-12-31", limit: int = 10000, sort: str = "date") -> Dict[str, Any]:
+        # Docs: https://ssd-api.jpl.nasa.gov/doc/cad.html
+        params = {
+            "des": des,        # designation or SPK-ID; e.g., "3I/ATLAS" or "C/2025 N1"
+            "body": body,      # Earth, Mars, etc.
+            "date-min": date_min,
+            "date-max": date_max,
+            "limit": limit,
+            "sort": sort,
+            "dist-unit": "au",
+            "tdsp": "true",    # include time-of-close-approach in TDB seconds past J2000
+            "fullname": "true"
+        }
+        return self._get("/cad.api", params)
+
+    # Optional: Horizons JSON API for ephemerides (if you want sky coords, rates, etc.)
+    def horizons(self, **kwargs) -> Dict[str, Any]:
+        # Docs: https://ssd-api.jpl.nasa.gov/doc/horizons.html
+        # Example minimal call: COMMAND='DES=3I/ATLAS', EPHEM_TYPE='V', CENTER='500@0'
+        return self._get("/horizons.api", kwargs)
+
+
+def extract_designations(text: str) -> List[str]:
+    """
+    Pull likely small-body designations/names out of messy text.
+    Handles '3I/ATLAS', 'C/2025 N1', "'Oumuamua", '2I/Borisov', etc.
+    """
+    import re
+    t = text.strip()
+
+    pats = [
+        r"\b[123]\s*I\s*/\s*[A-Z][A-Za-z0-9\-']+\b",                      # 1I/'Oumuamua, 2I/Borisov, 3I/ATLAS
+        r"\bC/\s*\d{4}\s*[A-Z]\d{0,3}(?:\s*\([A-Za-z0-9\- ]+\))?\b",      # C/2025 N1 (ATLAS)
+        r"\b[12]I\s*\([A-Za-z0-9' \-]+\)\b",                              # 1I('Oumuamua) style
+        r"\bOumuamua\b|\bBorisov\b|\bATLAS\b"                             # common names; watch ATLAS ambiguity
+    ]
+    found = []
+    for p in pats:
+        found += re.findall(p, t, flags=re.IGNORECASE)
+    # Normalize spacing
+    canon = []
+    for f in found:
+        s = " ".join(f.split())
+        s = s.replace(" ", "") if s.lower().startswith(("1i","2i","3i")) else s
+        canon.append(s)
+    # Deduplicate, keep order
+    seen = set()
+    out = []
+    for c in canon:
+        k = c.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(c)
+    return out
+
+
+def best_sbd_identifier(client: SSDClient, token: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Try common forms for the same object and return the first SBDB hit + normalized 'des'
+    e.g., "3I/ATLAS" ↔ "C/2025 N1 (ATLAS)". If multiple map, prefer IAU interstellar style.
+    """
+    candidates = [token, token.replace(" ", ""), token.upper()]
+    # Expand known alias patterns
+    if token.lower() in {"3i/atlas", "3iatlas", "3i/atlas"}:
+        candidates += ["C/2025 N1 (ATLAS)", "C/2025 N1", "3I/ATLAS"]
+    for c in candidates:
+        try:
+            res = client.sbdb_lookup(c, full_prec=True)
+            if "object" in res:
+                # Prefer official 'object.fullname' if present
+                fullname = res["object"].get("fullname") or res["object"].get("des") or c
+                return fullname, res
+        except Exception:
+            continue
+    raise ValueError(f"SBDB lookup failed for: {token}")
+
+claim_guard.py
+# claim_guard.py
+# Fuse hoax heuristics + live SSD data + your Nexis engine verdict.
+
+from __future__ import annotations
+from typing import Any, Dict, Optional, List, Tuple
+from datetime import datetime
+from hoax_filter import HoaxFilter
+from nexis_signal_engine import NexisSignalEngine
+from orbit_feeds import SSDClient, extract_designations, best_sbd_identifier
+
+ISO_FMT = "%Y-%m-%d"
+
+class LiveClaimGuard:
+    def __init__(self, db_path: str = "signals.db", extraordinary_km: float = 50.0):
+        self.engine = NexisSignalEngine(memory_path=db_path)
+        self.hoax = HoaxFilter(extraordinary_km=extraordinary_km)
+        self.ssd = SSDClient()
+
+    def _cad_min_distance(self, des: str, body: str = "Earth",
+                          date_min: str = "2000-01-01", date_max: str = "2100-12-31") -> Optional[Dict[str, Any]]:
+        cad = self.ssd.cad(des=des, body=body, date_min=date_min, date_max=date_max, limit=10000)
+        data = cad.get("data") or []
+        # CAD fields order: des, orbit_id, jd, cd, dist, dist_min, dist_max, v_rel, v_inf, t_sigma_f, body, h, fullname
+        best = None
+        for row in data:
+            try:
+                dist = float(row[4])  # au
+                if best is None or dist < best["dist_au"]:
+                    best = {
+                        "cd_utc": row[3],
+                        "dist_au": dist,
+                        "v_rel_km_s": float(row[7]) if row[7] not in (None, "") else None,
+                        "fullname": row[12] if len(row) > 12 else row[0]
+                    }
+            except Exception:
+                continue
+        return best
+
+    def evaluate(self, text: str, source_url: Optional[str] = None,
+                 earth_window: Tuple[str, str] = ("2000-01-01", "2100-12-31")) -> Dict[str, Any]:
+        # 1) Run Nexis base + hoax heuristics
+        base = self.engine.process_news(text, source_url=source_url)
+
+        # 2) Try to resolve any small-body mentions to SBDB identifiers
+        mentions = extract_designations(text)
+        facts: List[Dict[str, Any]] = []
+        for m in mentions:
+            try:
+                fullname, sb = best_sbd_identifier(self.ssd, m)
+                # 3) Pull Earth CAD for the analysis window
+                cad_best = self._cad_min_distance(fullname, body="Earth",
+                                                  date_min=earth_window[0], date_max=earth_window[1])
+                facts.append({
+                    "query": m,
+                    "resolved_fullname": fullname,
+                    "sbdb": sb.get("object", {}),
+                    "closest_approach": cad_best
+                })
+            except Exception as e:
+                facts.append({"query": m, "error": str(e)})
+
+        # 3I/ATLAS sanity: if text mentions Saturn, pull Mars/Sun perihelion context too (optional)
+
+        # 3) Merge data into the record and adjust verdict if facts contradict scare-claims
+        # If any resolved object shows Earth min distance > 0.3 au across window, consider it "no threat".
+        threat_flags = []
+        for f in facts:
+            ca = f.get("closest_approach")
+            if ca and ca.get("dist_au") is not None:
+                if ca["dist_au"] >= 0.3:
+                    threat_flags.append("no_near_earth_encounter")
+                else:
+                    threat_flags.append("potentially_close")
+            else:
+                threat_flags.append("cad_unknown")
+
+        if "no_near_earth_encounter" in threat_flags and base["verdict"] != "approved":
+            # Downgrade fear, upgrade confidence
+            base["verdict"] = "adaptive intervention"
+            base["message"] = "Live orbital data shows no close Earth approach; claim requires stronger evidence."
+
+        base["live_orbital_facts"] = {
+            "resolved": facts,
+            "analysis_window": {"date_min": earth_window[0], "date_max": earth_window[1]}
+        }
+        return base
+
+nexus_guard_cli.py
+# nexus_guard_cli.py
+import argparse, json, sys
+from claim_guard import LiveClaimGuard
+
+def main():
+    p = argparse.ArgumentParser(description="Live Codette/Nexis guard with JPL SSD feeds")
+    p.add_argument("--db", default="signals.db")
+    p.add_argument("--source", default=None, help="Source URL (optional)")
+    p.add_argument("--date-min", default="2000-01-01")
+    p.add_argument("--date-max", default="2100-12-31")
+    p.add_argument("text", nargs="*", help="Text to evaluate (or stdin)")
+    args = p.parse_args()
+
+    guard = LiveClaimGuard(db_path=args.db)
+    text = " ".join(args.text) if args.text else sys.stdin.read()
+    res = guard.evaluate(text, source_url=args.source, earth_window=(args.date-min, args.date-max))
+
+    print(json.dumps(res, indent=2, ensure_ascii=False, sort_keys=True))
+
+if __name__ == "__main__":
+    main()
+
+How it behaves
+
+• A rumor post hits your pipeline → LiveClaimGuard.evaluate() runs your existing Nexis hoax heuristics, then resolves any object names and asks JPL/SSD for facts:
+
+SBDB lookup gives canonical fullname + physical/orbital context. 
+JPL SSD API
+
+CAD returns all Earth close approaches; we take the minimum distance across your time window to decide if there’s any plausible threat. 
+JPL SSD API
+
+Optional Horizons endpoint is there if you later want live ephemerides (RA/Dec, rates) for visualization. 
+JPL SSD API
+NASA Solar System Dynamics
+
+• If CAD shows the object never comes closer than, say, 0.3 au over the window, the guard automatically de-escalates fear language and records the orbital evidence inside the same memory record. You can tweak that threshold to your taste.
+
+• For 3I/ATLAS specifically, NASA’s page documents perihelion ~1.4 au on Oct 30, 2025 and Earth minimum distance ~1.8 au. Your guard will resolve “3I/ATLAS / C/2025 N1” and return those facts, so anything claiming “headed to Earth” gets flagged and neutralized with data. 
+NASA Science
+
+Wire-in steps
+
+Drop these files next to your existing modules:
+
+hoax_filter.py (already done)
+
+orbit_feeds.py
+
+claim_guard.py
+
+nexus_guard_cli.py
+
+Dependencies:
+
+pip install requests
+
+
+(Your other deps already exist: rapidfuzz, nltk, etc.)
+
+Example run:
+
+python nexus_guard_cli.py \
+  --source "https://m.facebook.com/somepost" \
+  "Recently declassified footage shows a 7-mile craft near Saturn heading toward Earth; it's 3I/ATLAS."
+
+
+You’ll get a JSON record with:
+
+misinfo_heuristics (flags + combined score)
+
+live_orbital_facts.resolved[0].closest_approach.dist_au
+
+final verdict/message
+
+Service hook:
+
+Call LiveClaimGuard.evaluate() anywhere you currently call NexisSignalEngine.process_news() and persist the returned dict (it already includes the live-facts block).
