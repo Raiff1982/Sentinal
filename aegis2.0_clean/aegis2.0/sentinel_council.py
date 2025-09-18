@@ -17,14 +17,16 @@ from aegis_timescales import (
 # Default configuration
 DEFAULT_CONFIG = {
     "per_agent_timeout_sec": 2.5,
+    "max_workers": None,
     "memory": {
-        "max_entries": 20000,  # Match NexusMemory default
-        "default_ttl_secs": 14*24*3600  # 14 days (match NexusMemory default)
+        "max_entries": 10000,
+        "decay_rate": 0.01
     }
 }
 
 def get_council(
     per_agent_timeout_sec: float = 2.5,
+    max_workers: Optional[int] = None,
     memory_config: Optional[Dict[str, Any]] = None,
     persistence_path: Optional[str] = None
 ) -> AegisCouncil:
@@ -59,7 +61,8 @@ def get_council(
             
         # Initialize council
         council = AegisCouncil(
-            per_agent_timeout_sec=per_agent_timeout_sec
+            per_agent_timeout_sec=per_agent_timeout_sec,
+            max_workers=max_workers
         )
         
         # Register core agents

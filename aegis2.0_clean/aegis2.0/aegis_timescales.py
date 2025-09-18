@@ -4,7 +4,7 @@ import logging
 import threading
 import unicodedata
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -70,47 +70,20 @@ class InputSanitizer:
             "safe": len(issues) == 0
         }
 
-# Nexus Memory Types
-class MemoryEntry(TypedDict, total=False):
-    value: Any
-    timestamp: datetime
-    weight: float
-    entropy: float
-    ttl: int
-
-class MemorySnapshot(TypedDict, total=False):
-    version: str
-    store: Dict[str, MemoryEntry]
-    expiration_heap: List[Tuple[float, str]]
-    max_entries: int
-    default_ttl_secs: int
-
 # Nexus Memory
 class NexusMemory:
-    VERSION = "1.0.0"  # For backwards compatibility
-    
-    def __init__(
-        self,
-        max_entries: int = 20_000,
-        default_ttl_secs: int = 14*24*3600,
-        persistence_path: Optional[str] = None
-    ):
+    def __init__(self, max_entries: int = 20_000, default_ttl_secs: int = 14*24*3600):
         self.store: Dict[str, Dict[str, Any]] = {}
         self.expiration_heap: List[Tuple[float, str]] = []
         self.max_entries = max_entries
         self.default_ttl_secs = default_ttl_secs
         self._lock = threading.Lock()
-        self._persistence_path = persistence_path
-        
-        # Load from persistence if path provided
-        if persistence_path and os.path.exists(persistence_path):
-            self._load_from_disk()
 
     def _hash(self, key: str) -> str:
         return fast_hash(key.encode())
 
     def write(self, key: str, value: Any, weight: float = 1.0, entropy: float = 0.1, ttl_secs: Optional[int] = None) -> str:
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         hashed = self._hash(key)
         ttl = ttl_secs if ttl_secs is not None else self.default_ttl_secs
         with self._lock:
@@ -125,11 +98,6 @@ class NexusMemory:
             }
             expiration_time = (now + timedelta(seconds=ttl)).timestamp()
             heapq.heappush(self.expiration_heap, (expiration_time, hashed))
-            
-            # Auto-save if persistence enabled
-            if self._persistence_path:
-                self._save_to_disk()
-            
         return hashed
 
     def _purge_lowest_integrity(self, now: datetime) -> None:
@@ -147,7 +115,7 @@ class NexusMemory:
     def _integrity(self, rec: Dict[str, Any], now: Optional[datetime] = None) -> float:
         if not rec or "timestamp" not in rec:
             return 0.0
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.utcnow()
         age_sec = (now - rec.get("timestamp", now)).total_seconds()
         ttl = max(1, rec.get("ttl", self.default_ttl_secs))
         age_factor = max(0.0, 1.0 - (age_sec / ttl))
@@ -156,7 +124,7 @@ class NexusMemory:
         return max(0.0, (weight * age_factor) / (1.0 + entropy))
 
     def purge_expired(self) -> int:
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         now_ts = now.timestamp()
         with self._lock:
             while self.expiration_heap and self.expiration_heap[0][0] <= now_ts:
@@ -165,15 +133,10 @@ class NexusMemory:
                     del self.store[key]
             self.expiration_heap = [(t, k) for t, k in self.expiration_heap if k in self.store]
             heapq.heapify(self.expiration_heap)
-        
-        # Auto-save if persistence enabled
-        if self._persistence_path:
-            self._save_to_disk()
-            
-        return len(self.store)
+            return len(self.store)
 
     def audit(self) -> Dict[str, Dict[str, Any]]:
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         with self._lock:
             return {
                 k: {
@@ -184,107 +147,6 @@ class NexusMemory:
                     "integrity": round(self._integrity(v, now), 6)
                 } for k, v in self.store.items()
             }
-    
-    def _save_to_disk(self) -> None:
-        """Save memory state to disk."""
-        if not self._persistence_path:
-            return
-            
-        try:
-            with self._lock:
-                snapshot: MemorySnapshot = {
-                    "version": self.VERSION,
-                    "store": {},
-                    "expiration_heap": self.expiration_heap,
-                    "max_entries": self.max_entries,
-                    "default_ttl_secs": self.default_ttl_secs
-                }
-                
-                # Convert timestamps to ISO format for JSON serialization
-                for key, entry in self.store.items():
-                    snapshot["store"][key] = {
-                        **entry,
-                        "timestamp": entry["timestamp"].isoformat()
-                    }
-                
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(self._persistence_path), exist_ok=True)
-                
-                # Write atomically using temporary file
-                temp_path = f"{self._persistence_path}.tmp"
-                with open(temp_path, "w") as f:
-                    json.dump(snapshot, f)
-                os.replace(temp_path, self._persistence_path)
-                
-                log.debug("Memory state saved to %s", self._persistence_path)
-                
-        except Exception as e:
-            log.error("Failed to save memory state: %s", e, exc_info=True)
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-
-    def _load_from_disk(self) -> None:
-        """Load memory state from disk."""
-        if not self._persistence_path or not os.path.exists(self._persistence_path):
-            return
-            
-        try:
-            with open(self._persistence_path) as f:
-                snapshot: MemorySnapshot = json.load(f)
-                
-            # Version check
-            if snapshot.get("version") != self.VERSION:
-                log.warning(
-                    "Memory snapshot version mismatch: %s != %s",
-                    snapshot.get("version"), self.VERSION
-                )
-                return
-                
-            with self._lock:
-                # Load configuration
-                self.max_entries = snapshot.get("max_entries", self.max_entries)
-                self.default_ttl_secs = snapshot.get("default_ttl_secs", self.default_ttl_secs)
-                
-                # Load store with datetime conversion
-                self.store.clear()
-                now = datetime.now(timezone.utc)
-                
-                for key, entry in snapshot.get("store", {}).items():
-                    # Convert timestamp back to datetime
-                    try:
-                        entry["timestamp"] = datetime.fromisoformat(entry["timestamp"])
-                        # Skip expired entries
-                        if (now - entry["timestamp"]).total_seconds() > entry.get("ttl", self.default_ttl_secs):
-                            continue
-                        self.store[key] = entry
-                    except (ValueError, TypeError) as e:
-                        log.warning("Failed to load entry %s: %s", key, e)
-                        continue
-                
-                # Load expiration heap
-                self.expiration_heap = snapshot.get("expiration_heap", [])
-                # Clean expired entries from heap
-                now_ts = now.timestamp()
-                self.expiration_heap = [
-                    (t, k) for t, k in self.expiration_heap
-                    if t > now_ts and k in self.store
-                ]
-                heapq.heapify(self.expiration_heap)
-                
-                log.info(
-                    "Loaded %d entries from %s",
-                    len(self.store),
-                    self._persistence_path
-                )
-                
-        except Exception as e:
-            log.error("Failed to load memory state: %s", e, exc_info=True)
-            # Clear partial state
-            self.store.clear()
-            self.expiration_heap.clear()
 
 # RingStats
 class RingStats:
@@ -298,7 +160,7 @@ class RingStats:
     def push(self, value: float, t: Optional[datetime] = None) -> None:
         if not isinstance(value, (int, float)):
             raise ValueError("Value must be numeric")
-        t = t or datetime.now(timezone.utc)
+        t = t or datetime.utcnow()
         self.values.append((t.timestamp(), float(value)))
         # Invalidate EMA cache
         self._ema = None

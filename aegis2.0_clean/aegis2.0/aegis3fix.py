@@ -1,21 +1,3 @@
-from datetime import datetime, timezone, timedelta
-import os, threading, hashlib
-from typing import Dict, Any
-from .Sentinel import CouncilBundle, LedgerRecord
-import portalocker
-import json
-import logging
-log = logging.getLogger("AEGIS-Ledger")
-import hmac
-def stable_json(obj):
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
-
-# Default values and stubs for missing variables/functions
-DEFAULT_LEDGER_DIR = "./ledger"
-DEFAULT_SECRET_PATH = "./secret.key"
-DEFAULT_RETENTION_DAYS = 30
-def load_or_create_secret(path):
-    return "default_secret"
 class SignedLedger:
     def __init__(self, dirpath: str = DEFAULT_LEDGER_DIR, secret_path: str = DEFAULT_SECRET_PATH, retention_days: int = DEFAULT_RETENTION_DAYS):
         self.dir = os.path.abspath(dirpath)
@@ -27,7 +9,7 @@ class SignedLedger:
 
     def append(self, council_input: Dict, council_bundle: CouncilBundle, policy_snapshot: Dict) -> LedgerRecord:
         self._prune_old_files()
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = utcnow()
         decision = council_bundle.get("decision", "")
         edges = council_bundle.get("explainability_graph", {}).get("edges", [])
         rec: LedgerRecord = {
@@ -41,7 +23,7 @@ class SignedLedger:
             "sig": ""
         }
         rec["sig"] = self.sign({k: v for k, v in rec.items() if k != "sig"})
-        path = self._path_for_date(datetime.now(timezone.utc))
+        path = self._path_for_date(datetime.utcnow())
         with self._lock:
             try:
                 with portalocker.Lock(path, "a", timeout=5) as f:

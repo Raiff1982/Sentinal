@@ -1,9 +1,3 @@
-from datetime import datetime, timezone
-import os, threading, random, glob, json
-from typing import List, Dict
-from .Sentinel import ChallengeScenario
-import logging
-log = logging.getLogger("AEGIS-Scenarios")
 import glob
 from typing import Set
 
@@ -20,7 +14,7 @@ class ChallengeBank:
         with self._lock:
             self._scenarios.clear()
             self._shadow_scenarios.clear()
-            seed = int(datetime.now(timezone.utc).timestamp() // (24 * 3600))  # Daily rotation
+            seed = int(datetime.utcnow().timestamp() // (24 * 3600))  # Daily rotation
             rng = random.Random(seed)
             files = glob.glob(os.path.join(self._scenario_dir, "*.json"))
             rng.shuffle(files)
