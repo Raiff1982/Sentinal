@@ -60,10 +60,17 @@ hf = HoaxFilter()
 ai = AIBase()
 
 # Initialize Sentinel Council with persistence
-MEMORY_PATH = os.path.join(os.path.dirname(__file__), "sentinel_memory.json")
-council = get_council(persistence_path=MEMORY_PATH)
+MEMORY_PATH = os.path.join(os.path.dirname(__file__), "data")  # Create a data directory
+os.makedirs(MEMORY_PATH, exist_ok=True)
+MEMORY_FILE = os.path.join(MEMORY_PATH, "sentinel_memory.json")
+DATASET_PATH = os.path.join(MEMORY_PATH, "user_interactions.jsonl")
 
-DATASET_PATH = os.path.join(os.path.dirname(__file__), "user_interactions.jsonl")
+try:
+    council = get_council(persistence_path=MEMORY_FILE)
+    logger.info("Successfully initialized Sentinel Council")
+except Exception as e:
+    logger.error(f"Failed to initialize Sentinel Council: {e}")
+    raise
 
 def save_interaction(data):
     with open(DATASET_PATH, "a", encoding="utf-8") as f:
@@ -161,20 +168,41 @@ def scan():
 def sentinel_status():
     """Get the current status of the sentinel council."""
     try:
-        # Request a simple decision to check council health
-        out = council.dispatch({"text": "status check"})
-        memory_snapshot = out.get("memory_snapshot", {})
+        # Get basic council info
+        agent_names = [a.__class__.__name__ for a in council.agents]
+        memory_size = len(council.memory.store) if hasattr(council.memory, 'store') else 0
+        
+        # Try a simple decision to verify operation
+        test_input = {
+            "text": "status check",
+            "intent": "system check",
+            "_signals": {
+                "bio": {"stress": 0.0},
+                "env": {"context_risk": 0.0}
+            }
+        }
+        out = council.dispatch(test_input)
         
         return jsonify({
             "status": "ok",
-            "agents": len(out.get("reports", [])),
-            "memory_entries": len(memory_snapshot),
-            "reports": out.get("reports", [])
+            "council": {
+                "agents": agent_names,
+                "agent_count": len(agent_names),
+                "memory_size": memory_size,
+                "memory_path": council.memory.persistence_path if hasattr(council.memory, 'persistence_path') else None
+            },
+            "health_check": {
+                "reports": len(out.get("reports", [])),
+                "has_reports": bool(out.get("reports")),
+                "last_check": datetime.now().isoformat()
+            }
         })
     except Exception as e:
+        logger.error(f"Status check failed: {e}")
         return jsonify({
             "status": "error",
-            "error": str(e)
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
         }), 500
 
 @app.route('/api/sentinel/decide', methods=['POST'])
@@ -233,29 +261,57 @@ def sentinel_memory():
         decision = request.args.get('decision')
         time_window = request.args.get('time_window', type=int)  # In minutes
         
-        # Get memory entries
-        entries = council.memory.entries
+        # Get memory entries safely
+        entries = []
+        try:
+            if hasattr(council.memory, 'entries'):
+                entries = council.memory.entries
+            elif hasattr(council.memory, 'store'):
+                # Convert store dict to list format
+                entries = [
+                    {
+                        "id": key,
+                        "value": value.get("value"),
+                        "timestamp": value.get("timestamp"),
+                        "weight": value.get("weight", 1.0),
+                        "ttl": value.get("ttl")
+                    }
+                    for key, value in council.memory.store.items()
+                ]
+        except Exception as me:
+            logger.error(f"Memory access error: {me}")
+            entries = []
         
         # Apply filters
-        if agent:
-            entries = [e for e in entries if any(r['agent'] == agent for r in e.get('reports', []))]
-        if decision:
-            entries = [e for e in entries if any(r.get('details', {}).get('decision') == decision 
-                                               for r in e.get('reports', []))]
-        if time_window:
-            from datetime import datetime, timedelta
-            cutoff = datetime.now() - timedelta(minutes=time_window)
-            entries = [e for e in entries if datetime.fromisoformat(e['timestamp']) > cutoff]
-        if limit:
-            entries = entries[-limit:]
+        try:
+            if agent:
+                entries = [e for e in entries if any(r.get('agent') == agent for r in e.get('reports', []))]
+            if decision:
+                entries = [e for e in entries if any(r.get('details', {}).get('decision') == decision 
+                                                   for r in e.get('reports', []))]
+            if time_window:
+                cutoff = datetime.now() - timedelta(minutes=time_window)
+                entries = [
+                    e for e in entries 
+                    if isinstance(e.get('timestamp'), (str, datetime)) and 
+                    (datetime.fromisoformat(e['timestamp']) if isinstance(e['timestamp'], str) else e['timestamp']) > cutoff
+                ]
+            if limit and limit > 0:
+                entries = entries[-limit:]
+        except Exception as fe:
+            logger.error(f"Filter application error: {fe}")
         
-        # Get memory audit
-        audit = council.memory.audit()
+        # Get memory stats
+        stats = {
+            "total_entries": len(entries),
+            "store_size": len(council.memory.store) if hasattr(council.memory, 'store') else 0,
+            "persistence_path": council.memory.persistence_path if hasattr(council.memory, 'persistence_path') else None
+        }
         
         return jsonify({
             "status": "ok",
             "memory": entries,
-            "audit": audit,
+            "stats": stats,
             "filters_applied": {
                 "limit": limit,
                 "agent": agent,

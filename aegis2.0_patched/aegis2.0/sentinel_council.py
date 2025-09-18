@@ -32,7 +32,6 @@ def get_council(
     
     Args:
         per_agent_timeout_sec: Timeout per agent in seconds
-        max_workers: Maximum number of worker threads
         memory_config: Memory configuration overrides
         persistence_path: Path to memory persistence file
     """
