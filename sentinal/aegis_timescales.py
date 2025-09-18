@@ -1,3 +1,102 @@
+from datetime import timezone
+class BiofeedbackAgent(AegisAgent):
+	def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+		stress = float(input_data.get("_now_stress", 0.0))
+		arousal = float(input_data.get("_arousal", 0.0))
+		reliability = 0.85 + 0.1 * min(1.0, arousal)
+		influence = 0.3 + 0.5 * stress + 0.2 * arousal
+		severity = min(1.0, 0.6 * stress + 0.4 * arousal)
+		details = {"stress": round(stress, 4), "arousal": round(arousal, 4)}
+		self.memory.write(f"{self.name}:biofeedback", details, weight=0.8, entropy=0.2, ttl_secs=3600)
+		return {
+			"summary": "Biofeedback agent (stress/arousal)",
+			"influence": influence,
+			"reliability": reliability,
+			"severity": severity,
+			"details": details
+		}
+
+class EnvSignalAgent(AegisAgent):
+	def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+		context_risk = float(input_data.get("context_risk", 0.0))
+		entropy = float(input_data.get("entropy", 0.0))
+		reliability = 0.8 + 0.15 * min(1.0, entropy)
+		influence = 0.25 + 0.6 * context_risk + 0.15 * entropy
+		severity = min(1.0, 0.7 * context_risk + 0.3 * entropy)
+		details = {"context_risk": round(context_risk, 4), "entropy": round(entropy, 4)}
+		self.memory.write(f"{self.name}:envsignal", details, weight=0.85, entropy=0.25, ttl_secs=7200)
+		return {
+			"summary": "Environmental signal agent (risk/entropy)",
+			"influence": influence,
+			"reliability": reliability,
+			"severity": severity,
+			"details": details
+		}
+
+class ContextConflictAgent(AegisAgent):
+	def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+		conflict = float(input_data.get("conflict", 0.0))
+		reliability = float(input_data.get("reliability", 0.5))
+		influence = 0.2 + 0.7 * conflict
+		severity = min(1.0, 0.8 * conflict + 0.2 * reliability)
+		details = {"conflict": round(conflict, 4), "reliability": round(reliability, 4)}
+		self.memory.write(f"{self.name}:contextconflict", details, weight=0.9, entropy=0.18, ttl_secs=5400)
+		return {
+			"summary": "Context conflict agent (conflict/reliability)",
+			"influence": influence,
+			"reliability": reliability,
+			"severity": severity,
+			"details": details
+		}
+class BiofeedbackAgent(AegisAgent):
+	def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+		stress = float(input_data.get("_now_stress", 0.0))
+		arousal = float(input_data.get("_arousal", 0.0))
+		reliability = 0.85 + 0.1 * min(1.0, arousal)
+		influence = 0.3 + 0.5 * stress + 0.2 * arousal
+		severity = min(1.0, 0.6 * stress + 0.4 * arousal)
+		details = {"stress": round(stress, 4), "arousal": round(arousal, 4)}
+		self.memory.write(f"{self.name}:biofeedback", details, weight=0.8, entropy=0.2, ttl_secs=3600)
+		return {
+			"summary": "Biofeedback agent (stress/arousal)",
+			"influence": influence,
+			"reliability": reliability,
+			"severity": severity,
+			"details": details
+		}
+
+class EnvSignalAgent(AegisAgent):
+	def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+		context_risk = float(input_data.get("context_risk", 0.0))
+		entropy = float(input_data.get("entropy", 0.0))
+		reliability = 0.8 + 0.15 * min(1.0, entropy)
+		influence = 0.25 + 0.6 * context_risk + 0.15 * entropy
+		severity = min(1.0, 0.7 * context_risk + 0.3 * entropy)
+		details = {"context_risk": round(context_risk, 4), "entropy": round(entropy, 4)}
+		self.memory.write(f"{self.name}:envsignal", details, weight=0.85, entropy=0.25, ttl_secs=7200)
+		return {
+			"summary": "Environmental signal agent (risk/entropy)",
+			"influence": influence,
+			"reliability": reliability,
+			"severity": severity,
+			"details": details
+		}
+
+class ContextConflictAgent(AegisAgent):
+	def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+		conflict = float(input_data.get("conflict", 0.0))
+		reliability = float(input_data.get("reliability", 0.5))
+		influence = 0.2 + 0.7 * conflict
+		severity = min(1.0, 0.8 * conflict + 0.2 * reliability)
+		details = {"conflict": round(conflict, 4), "reliability": round(reliability, 4)}
+		self.memory.write(f"{self.name}:contextconflict", details, weight=0.9, entropy=0.18, ttl_secs=5400)
+		return {
+			"summary": "Context conflict agent (conflict/reliability)",
+			"influence": influence,
+			"reliability": reliability,
+			"severity": severity,
+			"details": details
+		}
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
 	from .aegis_timescales import AegisAgent, NexusMemory, MetaJudgeAgent, TimeScaleCoordinator
@@ -9,7 +108,8 @@ from typing import Dict, Any, List, Optional, Tuple, Deque
 from abc import ABC, abstractmethod
 
 
-# ...existing code...
+
+
 
 # Place MetaJudgeAgent and TimeScaleCoordinator after AegisAgent and NexusMemory
 
@@ -107,7 +207,7 @@ class AegisAgent(ABC):
 		...
 
 	def _safe_run(self, input_data: Dict[str, Any]) -> AgentReport:
-		started = datetime.utcnow().isoformat()
+		started = datetime.now(timezone.utc).isoformat()
 		try:
 			result = self.analyze(input_data)
 			ok = True
@@ -117,7 +217,7 @@ class AegisAgent(ABC):
 			ok = False
 			result = {}
 			err = f"{type(e).__name__}: {e}"
-		finished = datetime.utcnow().isoformat()
+		finished = datetime.now(timezone.utc).isoformat()
 		return {
 			"agent": self.name,
 			"ok": ok,
@@ -320,7 +420,7 @@ class NexusMemory:
 		return fast_hash(key.encode())
 
 	def write(self, key: str, value: Any, weight: float = 1.0, entropy: float = 0.1, ttl_secs: Optional[int] = None) -> str:
-		now = datetime.utcnow()
+		now = datetime.now(timezone.utc)
 		hashed = self._hash(key)
 		ttl = ttl_secs if ttl_secs is not None else self.default_ttl_secs
 		with self._lock:
@@ -352,7 +452,7 @@ class NexusMemory:
 	def _integrity(self, rec: Dict[str, Any], now: Optional[datetime] = None) -> float:
 		if not rec or "timestamp" not in rec:
 			return 0.0
-		now = now or datetime.utcnow()
+		now = now or datetime.now(timezone.utc)
 		age_sec = (now - rec.get("timestamp", now)).total_seconds()
 		ttl = max(1, rec.get("ttl", self.default_ttl_secs))
 		import json
@@ -494,7 +594,7 @@ class RingStats:
 	def push(self, value: float, t: Optional[datetime] = None) -> None:
 		if not isinstance(value, (int, float)):
 			raise ValueError("Value must be numeric")
-		t = t or datetime.utcnow()
+		t = t or datetime.now(timezone.utc)
 		self.values.append((t.timestamp(), float(value)))
 		self._ema = None
 

@@ -1,3 +1,31 @@
+## Testing & Continuous Integration
+
+Run the full test suite:
+```bash
+python -m pytest -v tests
+```
+
+Run the smoke test only:
+```bash
+python -m pytest -v tests/test_smoke.py
+```
+
+For CI, add these commands to your workflow to ensure all guardrails and council logic are validated before release.
+## Tamper-Evident Ledger & Integrity Verification
+
+All system actions are logged to a tamper-evident ledger (JSONL) with HMAC signatures.
+To verify ledger integrity locally:
+
+```bash
+python verify_ledger.py path/to/ledger.jsonl SECRET_KEY
+```
+
+This checks every entry for a valid HMAC signature using your secret key. If any entry fails, you'll see a mismatch warning.
+
+**Best practices:**
+- Store your ledger securely and back it up regularly.
+- Never share your secret key publicly.
+- Use the verify script after any suspicious activity or before audits.
 
 
 
@@ -23,10 +51,19 @@
 pip install -r requirements.txt
 ```
 
+
 ## Quickstart
 
 ```bash
+# Install runtime dependencies
+pip install -r requirements.txt
+# For development and testing
+pip install -r requirements-dev.txt
+
+# Run tests (minimal pytest suite)
 python -m pytest -q tests
+
+# Run CLI and web UI
 python sentinal/aegisctl.py challenges
 python sentinal/aegisctl.py serve --port 8787
 
@@ -56,6 +93,30 @@ flask run
 - **Feedback & Labeling:** Label scan/chat results for model improvement
 - **Export:** Download interactions, feedback, and analytics data
 - **Retrain & Deploy:** One-click retraining and deployment of models
+
+
+## Secrets & Environment Variables
+All secrets and sensitive config are loaded from environment variables only.
+
+**How to use secrets:**
+- Copy `.env.example` to `.env` in your project root.
+- Edit `.env` and set values for `SECRET_KEY`, `DATABASE_URL`, `API_TOKEN`, etc.
+- Never commit `.env` or secrets to source control. `.gitignore` already excludes `.env`.
+- The application loads secrets at runtime using `os.environ` or dotenv.
+
+**Example .env:**
+```
+SECRET_KEY=changeme
+DATABASE_URL=sqlite:///sentinal.db
+MODEL_PATH=sentinal/models/
+API_TOKEN=your_api_token_here
+DEBUG=False
+```
+
+**Best practices:**
+- Use strong, unique values for `SECRET_KEY` and `API_TOKEN`.
+- Store production secrets securely (e.g., environment manager, vault).
+- Never hardcode secrets in code or commit them to git.
 
 ## Troubleshooting
 - If you see `ModuleNotFoundError: No module named 'sentinal'`, ensure you run from the workspace root or use the provided run commands above.
@@ -90,6 +151,15 @@ Sentinal/
 ├── .gitignore
 └── other metadata/files
 ```
+
+
+## Tamper-Evident Ledger Integrity
+To verify the integrity of your HMAC-signed ledger:
+
+```bash
+python verify_ledger.py path/to/ledger.jsonl SECRET_KEY
+```
+If all entries pass, you'll see `Ledger integrity: OK`. Otherwise, any mismatches will be reported by line.
 
 ## Documentation
 - See admin dashboard for links to PDF and Markdown docs

@@ -1,0 +1,8 @@
+pytest>=7.4.2
+hypothesis>=6.88.1
+rich>=13.7.0
+portalocker>=2.8.2
+jsonschema>=4.19.2
+scipy>=1.11.4
+xxhash>=3.4.1
+click>=8.1.7

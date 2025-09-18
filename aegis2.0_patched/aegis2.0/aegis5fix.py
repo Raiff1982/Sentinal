@@ -1,3 +1,6 @@
+from datetime import datetime, timezone, timedelta
+import threading, heapq
+from typing import Dict, Any, List, Tuple, Optional
 import queue
 
 class NexusMemory:
@@ -14,7 +17,7 @@ class NexusMemory:
     def _process_writes(self) -> None:
         while True:
             key, value, ttl = self._write_queue.get()
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             hashed = self._hash(key)
             with self._lock:
                 if len(self.store) >= self.max_entries:

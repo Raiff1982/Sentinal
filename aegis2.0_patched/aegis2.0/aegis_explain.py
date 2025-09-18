@@ -1,3 +1,8 @@
+from datetime import datetime, timezone, timedelta
+import os
+from typing import Dict, List, Optional
+import logging
+log = logging.getLogger("AEGIS-Explain")
 import os
 import json
 import math
@@ -39,7 +44,7 @@ class ExplainSnapshot:
             raise ValueError("Influence index must map strings to numbers")
         if not isinstance(meta, dict):
             raise ValueError("Meta must be a dictionary")
-        self.ts = datetime.utcnow().isoformat()
+    self.ts = datetime.now(timezone.utc).isoformat()
         self.nodes = nodes
         self.edges = edges
         self.influence_index = {k: max(0.0, min(1.0, float(v))) for k, v in influence_index.items()}
@@ -67,7 +72,7 @@ class ExplainSnapshot:
             influence_index = d.get("influence_index", {})
             meta = d.get("meta", {})
             snap = ExplainSnapshot(nodes, edges, influence_index, meta)
-            snap.ts = d.get("ts", datetime.utcnow().isoformat())
+            snap.ts = d.get("ts", datetime.now(timezone.utc).isoformat())
             return snap
         except (KeyError, ValueError) as e:
             log.error("Invalid snapshot dictionary: %s", e)
@@ -88,7 +93,7 @@ class ExplainStore:
         return os.path.join(self.root, f"{self.prefix}-{day}.jsonl")
 
     def _prune_old_files(self) -> None:
-        cutoff = datetime.utcnow() - timedelta(days=self.max_age_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=self.max_age_days)
         for fname in os.listdir(self.root):
             if fname.startswith(self.prefix) and fname.endswith(".jsonl"):
                 try:
@@ -102,7 +107,7 @@ class ExplainStore:
 
     def append(self, snap: ExplainSnapshot) -> None:
         self._prune_old_files()
-        path = self._path_for_date(datetime.utcnow())
+    path = self._path_for_date(datetime.now(timezone.utc))
         try:
             with portalocker.Lock(path, "a", timeout=5) as f:
                 f.write(snap.to_json() + "\n")
@@ -135,7 +140,7 @@ class ExplainStore:
     def window(self, hours: int) -> List[ExplainSnapshot]:
         if hours < 0:
             raise ValueError("Hours must be non-negative")
-        end = datetime.utcnow()
+    end = datetime.now(timezone.utc)
         start = end - timedelta(hours=hours)
         return self._load_between(start, end)
 
@@ -244,7 +249,7 @@ class WhyEngine:
     def _split(self, start_hours: int, end_hours: int) -> Tuple[List[ExplainSnapshot], List[ExplainSnapshot]]:
         if start_hours < 0 or end_hours < 0:
             raise ValueError("Hours must be non-negative")
-        now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
         A = self.store.window(start_hours)
         B = self.store.window(end_hours)
         return A, B

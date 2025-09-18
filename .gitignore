@@ -1,0 +1,38 @@
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Test and coverage
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archives and fixtures
+tests/fixtures/
+archive/*.zip
+sentinel_release_kit.zip
+aegis2.0_patched.zip
+aegis2.0_patched_with_nexus.zip
+Aegis2.0_safe_package.zip
+aegis_sentinel_zenodo_package.zip
+
+# Secrets
+.env
+.env.*

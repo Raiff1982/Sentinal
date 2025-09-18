@@ -1,3 +1,5 @@
+from datetime import datetime, timezone, timedelta
+import heapq, threading
 import json
 import logging
 import math
@@ -36,7 +38,7 @@ class NexusMemory:
         return xxhash.xxh64(key.encode()).hexdigest()
 
     def write(self, key: str, value: Any, ttl_secs: Optional[int] = None) -> None:
-        now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
         hashed = self._hash(key)
         ttl = ttl_secs if ttl_secs is not None else self.default_ttl_secs
         with self._lock:
@@ -60,7 +62,7 @@ class NexusMemory:
             return self.store.get(hashed, {}).get("value")
 
     def purge_expired(self) -> int:
-        now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
         now_ts = now.timestamp()
         with self._lock:
             while self.expiration_heap and self.expiration_heap[0][0] <= now_ts:
@@ -92,7 +94,7 @@ def agent_report(agent: str, ok: bool, influence: float, reliability: float, sev
         "reliability": max(0.0, min(1.0, float(reliability))),
         "severity": max(0.0, min(1.0, float(severity))),
         "details": details,
-        "diagnostics": {"started": datetime.utcnow().isoformat(), "finished": datetime.utcnow().isoformat()}
+    "diagnostics": {"started": datetime.now(timezone.utc).isoformat(), "finished": datetime.now(timezone.utc).isoformat()}
     }
 
 # Agents
@@ -433,7 +435,7 @@ class PolicyStore:
 
     def save(self, genes: MetaGenes, metrics: Dict[str, Any]) -> None:
         record = {
-            "saved_at": datetime.utcnow().isoformat(),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
             "genes": asdict(genes),
             "metrics": metrics,
             "guardian_hash": metrics.get("guardian_hash")

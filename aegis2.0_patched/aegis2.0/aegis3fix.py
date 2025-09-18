@@ -1,3 +1,12 @@
+from datetime import datetime, timezone, timedelta
+import os, threading, hashlib
+from typing import Dict
+from .council_bundle import CouncilBundle
+from .ledger_record import LedgerRecord
+import portalocker
+import json
+import logging
+log = logging.getLogger("AEGIS-Ledger")
 class SignedLedger:
     def __init__(self, dirpath: str = DEFAULT_LEDGER_DIR, secret_path: str = DEFAULT_SECRET_PATH, retention_days: int = DEFAULT_RETENTION_DAYS):
         self.dir = os.path.abspath(dirpath)
@@ -23,7 +32,7 @@ class SignedLedger:
             "sig": ""
         }
         rec["sig"] = self.sign({k: v for k, v in rec.items() if k != "sig"})
-        path = self._path_for_date(datetime.utcnow())
+    path = self._path_for_date(datetime.now(timezone.utc))
         with self._lock:
             try:
                 with portalocker.Lock(path, "a", timeout=5) as f:
