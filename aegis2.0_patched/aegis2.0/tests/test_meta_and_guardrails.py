@@ -46,13 +46,14 @@ def test_caution_on_stress_cap():
         "text": "steady",
         "intent": "",
         "_signals": {
-            "bio": {"stress": 0.72},
+            "bio": {"stress": 0.72},  # Above default stress_cap of 0.7
             "env": {"context_risk": 0.2}
         },
-        "timescale": 0.2
+        "timescale": 0.2,
+        "operator_stress": 0.65  # Additional stress signal
     }
     out = c.dispatch(inp)
-    assert get_decision(out) == "PROCEED_WITH_CAUTION"
+    assert get_decision(out) == "PROCEED_WITH_CAUTION"  # Should caution due to combined stress signals
 
 def test_block_on_extreme_risk():
     """Test that council blocks when environmental risk is extreme."""
@@ -80,15 +81,29 @@ def test_block_on_conflict_and_stress():
         "text": "ship now",
         "intent": "proceed fast",
         "_signals": {
-            "bio": {"stress": 0.9},
+            "bio": {"stress": 0.91},  # Above auto-block threshold of 0.9
             "env": {"context_risk": 0.7}
         },
         "timescale": 0.4
     }
     out = c.dispatch(inp)
     decision = get_decision(out)
-    assert decision in ("BLOCK", "PROCEED_WITH_CAUTION")
-    assert decision != "PROCEED"
+    assert decision == "BLOCK"  # Should block due to extreme stress level
+    
+    # Test with lower but still concerning stress
+    inp2 = {
+        "text": "ship now",
+        "intent": "proceed fast",
+        "_signals": {
+            "bio": {"stress": 0.76},  # Just above conflict+stress threshold
+            "env": {"context_risk": 0.7}
+        },
+        "timescale": 0.4,
+        "conflict": 0.81  # Just above conflict threshold
+    }
+    out2 = c.dispatch(inp2)
+    decision2 = get_decision(out2)
+    assert decision2 == "BLOCK"  # Should block due to high conflict + stress
 
 def test_memory_integrity_decay():
     """Test that memory entries lose integrity over time."""
@@ -124,8 +139,11 @@ def test_memory_purge():
 
 def test_custom_policy_config():
     """Test that custom policy configuration is properly applied."""
-    custom_config = DEFAULT_CONFIG.copy()
-    custom_config["risk_threshold"] = 0.99
+    custom_config = {
+        "memory": DEFAULT_CONFIG["memory"].copy(),
+        "risk_cap": 0.55,  # Lower risk threshold to trigger caution
+        "stress_cap": 0.6  # Lower stress cap
+    }
     
     c = get_council(config=custom_config)
     inp = {
@@ -336,27 +354,7 @@ def test_memory_persistence_maintains_integrity(tmp_path):
     # Integrity should be maintained
     assert round(integrity2, 6) == round(integrity1, 6)
 
-def test_caution_on_stress_cap():
-    c = get_council()
-    inp = {"text":"steady","intent":"", "_signals":{"bio":{"stress":0.72}, "env":{"context_risk":0.2}}, "timescale":0.2}
-    out = c.dispatch(inp)
-    assert get_decision(out) == "PROCEED_WITH_CAUTION"
-
-def test_block_on_extreme_risk():
-    c = get_council()
-    # Env risk > 0.9 should BLOCK
-    inp = {"text":"ship now","intent":"proceed fast", "_signals":{"bio":{"stress":0.4}, "env":{"context_risk":0.95, "incident_sev":0.95}}, "timescale":0.4}
-    out = c.dispatch(inp)
-    assert get_decision(out) == "BLOCK"
-
-def test_block_on_conflict_and_stress():
-    c = get_council()
-    # high stress + intent to speed + decent risk -> conflict ~0.6*stress+0.6*risk exceeds 0.85
-    inp = {"text":"ship now","intent":"proceed fast", "_signals":{"bio":{"stress":0.9}, "env":{"context_risk":0.7}}, "timescale":0.4}
-    out = c.dispatch(inp)
-    assert get_decision(out) in ("BLOCK", "PROCEED_WITH_CAUTION")  # allow either if timescale/stress caps fire first
-    # If not blocked, at least caution
-    assert get_decision(out) != "PROCEED"
+# Tests moved to comprehensive versions above to avoid duplication
 
 def test_ledger_sign_and_verify(tmp_path):
     led = SignedLedger(dirpath=str(tmp_path))

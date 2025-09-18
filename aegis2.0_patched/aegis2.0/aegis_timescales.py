@@ -1,110 +1,26 @@
+"""Multi-timescale diagnostic system."""
+
 import json
 import math
 import logging
 import threading
 import unicodedata
 import re
+import os
 from datetime import datetime, timedelta, timezone
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Deque, Dict, List, Tuple, Any, Optional, TypedDict
-import heapq
-try:
-    import xxhash
-except Exception:
-    xxhash = None
-import os
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+from typing import Dict, List, Any, Sequence, Optional, TypedDict, Tuple, Deque
 
-# Hash helper
-def fast_hash(data: bytes) -> str:
-    if xxhash is not None:
-        return xxhash.xxh64(data).hexdigest()
-    import hashlib
-    return hashlib.sha256(data).hexdigest()
+log = logging.getLogger(__name__)
 
+def _now() -> datetime:
+    """Get current UTC time."""
+    return datetime.now(timezone.utc)
 
-# Logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("AEGIS-Timescales")
-
-# Sanitizer
-class InputSanitizer:
-    CONTROL_CHARS = {chr(i) for i in range(0, 32)} | {chr(127)}
-    DANGEROUS_TOKENS = {
-        r"\bexec\(", r"\beval\(", r"\bos\.system", r"\bsubprocess\.",
-        r"<script\b", r"\.\./", r"\.\.\\", r"\033"
-    }
-    MAX_INPUT_LENGTH = 10_000
-
-    @staticmethod
-    def normalize(text: str) -> str:
-        if len(text) > InputSanitizer.MAX_INPUT_LENGTH:
-            raise ValueError(f"Input exceeds max length of {InputSanitizer.MAX_INPUT_LENGTH}")
-        return unicodedata.normalize("NFC", text)
-
-    @staticmethod
-    def escape_html(text: str) -> str:
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    @staticmethod
-    def audit_text(text: str) -> Dict[str, Any]:
-        """Audit input text for security and safety issues.
-        
-        Args:
-            text: Input text to audit
-            
-        Returns:
-            Dict containing:
-            - normalized: Normalized text
-            - issues: List of found issues 
-            - safe: Whether text is safe to process
-            - warnings: Non-blocking informational warnings
-        """
-        if not isinstance(text, str):
-            return {
-                "normalized": "", 
-                "issues": ["invalid_type"], 
-                "safe": False,
-                "warnings": []
-            }
-            
-        issues = []
-        warnings = []
-        
-        # Check for critical issues
-        if len(text) > InputSanitizer.MAX_INPUT_LENGTH:
-            issues.append("input_too_long")
-            
-        for ch in InputSanitizer.CONTROL_CHARS:
-            if ch in text:
-                issues.append("control_char")
-                break
-                
-        for tok in InputSanitizer.DANGEROUS_TOKENS:
-            if re.search(tok, text, re.IGNORECASE):
-                issues.append(f"danger_token:{tok}")
-                
-        # Check for informational warnings
-        if "\n" in text or "\r" in text:
-            warnings.append("newline_present")
-            
-        # Normalize text
-        try:
-            normalized = InputSanitizer.normalize(text)
-        except ValueError as e:
-            issues.append(f"normalization_failed:{str(e)}")
-            normalized = ""
-            
-        return {
-            "normalized": normalized,
-            "issues": sorted(set(issues)),
-            "warnings": sorted(set(warnings)),
-            "safe": len(issues) == 0  # Only critical issues affect safety
-        }
-
-# Nexus Memory Types
 class MemoryEntry(TypedDict, total=False):
+    """Memory entry type definition."""
     value: Any
     timestamp: datetime
     weight: float
@@ -112,730 +28,1003 @@ class MemoryEntry(TypedDict, total=False):
     ttl: int
 
 class MemorySnapshot(TypedDict, total=False):
+    """Memory snapshot type definition."""
     version: str
     store: Dict[str, MemoryEntry]
     expiration_heap: List[Tuple[float, str]]
     max_entries: int
     default_ttl_secs: int
 
-# Nexus Memory
 class NexusMemory:
-    VERSION = "1.0.0"  # For backwards compatibility
+    """Memory system with integrity tracking and persistence."""
+    VERSION = "1.0.0"
     
     def __init__(
         self,
         max_entries: int = 20_000,
         default_ttl_secs: int = 14*24*3600,
-        persistence_path: Optional[str] = None
+        persistence_path: Optional[str] = None,
+        initial_entries: Optional[Dict[str, Dict[str, Any]]] = None
     ):
-        self.store: Dict[str, Dict[str, Any]] = {}
-        self.expiration_heap: List[Tuple[float, str]] = []
+        """Initialize memory system."""
         self.max_entries = max_entries
         self.default_ttl_secs = default_ttl_secs
+        self._store: Dict[str, MemoryEntry] = {}
+        self._expiration_heap: List[Tuple[float, str]] = []
         self._lock = threading.Lock()
-        self._persistence_path = persistence_path
+        self.persistence_path = persistence_path
+        self._last_cleanup = _now()
         
-        # Load from persistence if path provided
         if persistence_path and os.path.exists(persistence_path):
             self._load_from_disk()
-
-    def _hash(self, key: str) -> str:
-        return fast_hash(key.encode())
-
-    def write(self, key: str, value: Any, weight: float = 1.0, entropy: float = 0.1, ttl_secs: Optional[int] = None) -> str:
-        now = datetime.now(timezone.utc)
-        hashed = self._hash(key)
-        ttl = ttl_secs if ttl_secs is not None else self.default_ttl_secs
-        with self._lock:
-            if len(self.store) >= self.max_entries:
-                self._purge_lowest_integrity(now)
-            self.store[hashed] = {
-                "value": value,
-                "timestamp": now,
-                "weight": max(0.0, float(weight)),
-                "entropy": max(0.0, float(entropy)),
-                "ttl": int(ttl)
-            }
-            expiration_time = (now + timedelta(seconds=ttl)).timestamp()
-            heapq.heappush(self.expiration_heap, (expiration_time, hashed))
-            
-            # Auto-save if persistence enabled
-            if self._persistence_path:
-                self._save_to_disk()
-            
-        return hashed
-
-    def _purge_lowest_integrity(self, now: datetime) -> None:
-        if not self.store:
-            return
-        oldest_key = min(self.store.keys(), key=lambda k: self._integrity(self.store[k], now))
-        del self.store[oldest_key]
-        self.expiration_heap = [(t, k) for t, k in self.expiration_heap if k != oldest_key]
-        heapq.heapify(self.expiration_heap)
-
-    def read(self, key: str) -> Any:
-        hashed = self._hash(key)
-        return self.store.get(hashed, {}).get("value")
-
-    def _integrity(self, rec: Dict[str, Any], now: Optional[datetime] = None) -> float:
-        if not rec or "timestamp" not in rec:
-            return 0.0
-        now = now or datetime.now(timezone.utc)
-        age_sec = (now - rec.get("timestamp", now)).total_seconds()
-        ttl = max(1, rec.get("ttl", self.default_ttl_secs))
-        age_factor = max(0.0, 1.0 - (age_sec / ttl))
-        weight = rec.get("weight", 1.0)
-        entropy = rec.get("entropy", 0.1)
-        return max(0.0, (weight * age_factor) / (1.0 + entropy))
-
-    def purge_expired(self) -> int:
-        now = datetime.now(timezone.utc)
-        now_ts = now.timestamp()
-        with self._lock:
-            while self.expiration_heap and self.expiration_heap[0][0] <= now_ts:
-                _, key = heapq.heappop(self.expiration_heap)
-                if key in self.store and (now - self.store[key]["timestamp"]).total_seconds() > self.store[key]["ttl"]:
-                    del self.store[key]
-            self.expiration_heap = [(t, k) for t, k in self.expiration_heap if k in self.store]
-            heapq.heapify(self.expiration_heap)
+        elif initial_entries:
+            with self._lock:
+                for key, value in initial_entries.items():
+                    self.set(key, value)
+                    
+    def _serialize_entry(self, entry: MemoryEntry) -> Dict[str, Any]:
+        """Serialize memory entry for persistence."""
+        return {
+            "value": entry["value"],
+            "timestamp": entry["timestamp"].isoformat(),
+            "weight": entry.get("weight", 1.0),
+            "entropy": entry.get("entropy", 0.0),
+            "ttl": entry.get("ttl", self.default_ttl_secs)
+        }
         
-        # Auto-save if persistence enabled
-        if self._persistence_path:
-            self._save_to_disk()
+    def _deserialize_entry(self, data: Dict[str, Any]) -> MemoryEntry:
+        """Deserialize memory entry from persistence."""
+        entry: MemoryEntry = {
+            "value": data["value"],
+            "timestamp": datetime.fromisoformat(data["timestamp"]),
+            "weight": float(data.get("weight", 1.0)),
+            "entropy": float(data.get("entropy", 0.0)),
+            "ttl": int(data.get("ttl", self.default_ttl_secs))
+        }
+        return entry
+        
+    def _load_from_disk(self) -> None:
+        """Load memory from disk."""
+        try:
+            with open(self.persistence_path, "r") as f:
+                data = json.load(f)
+                
+            if data.get("version") != self.VERSION:
+                log.warning(f"Memory version mismatch: {data.get('version')} vs {self.VERSION}")
+                return
+                
+            with self._lock:
+                self._store.clear()
+                self._expiration_heap.clear()
+                
+                for key, entry_data in data["store"].items():
+                    entry = self._deserialize_entry(entry_data)
+                    expiration = entry["timestamp"] + timedelta(seconds=entry["ttl"])
+                    
+                    # Skip expired entries
+                    if expiration <= _now():
+                        continue
+                        
+                    self._store[key] = entry
+                    self._expiration_heap.append((expiration.timestamp(), key))
+                    
+                self._expiration_heap.sort()
+                
+        except Exception as e:
+            log.error(f"Failed to load memory from {self.persistence_path}: {e}")
             
-        return len(self.store)
-
-    def audit(self) -> Dict[str, Dict[str, Any]]:
-        now = datetime.now(timezone.utc)
-        with self._lock:
-            return {
-                k: {
-                    "timestamp": v.get("timestamp").isoformat(),
-                    "weight": v.get("weight"),
-                    "entropy": v.get("entropy"),
-                    "ttl": v.get("ttl"),
-                    "integrity": round(self._integrity(v, now), 6)
-                } for k, v in self.store.items()
-            }
-    
     def _save_to_disk(self) -> None:
-        """Save memory state to disk."""
-        if not self._persistence_path:
+        """Save memory to disk."""
+        if not self.persistence_path:
             return
             
         try:
             with self._lock:
-                snapshot: MemorySnapshot = {
+                data = {
                     "version": self.VERSION,
-                    "store": {},
-                    "expiration_heap": self.expiration_heap,
+                    "store": {
+                        key: self._serialize_entry(entry)
+                        for key, entry in self._store.items()
+                    },
+                    "expiration_heap": self._expiration_heap,
                     "max_entries": self.max_entries,
                     "default_ttl_secs": self.default_ttl_secs
                 }
                 
-                # Convert timestamps to ISO format for JSON serialization
-                for key, entry in self.store.items():
-                    snapshot["store"][key] = {
-                        **entry,
-                        "timestamp": entry["timestamp"].isoformat()
-                    }
+            # Use atomic write pattern
+            temp_path = f"{self.persistence_path}.tmp"
+            with open(temp_path, "w") as f:
+                json.dump(data, f, indent=2)
                 
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(self._persistence_path), exist_ok=True)
-                
-                # Write atomically using temporary file
-                temp_path = f"{self._persistence_path}.tmp"
-                with open(temp_path, "w") as f:
-                    json.dump(snapshot, f)
-                os.replace(temp_path, self._persistence_path)
-                
-                log.debug("Memory state saved to %s", self._persistence_path)
-                
+            os.replace(temp_path, self.persistence_path)
+            
         except Exception as e:
-            log.error("Failed to save memory state: %s", e, exc_info=True)
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-
-    def _load_from_disk(self) -> None:
-        """Load memory state from disk."""
-        if not self._persistence_path or not os.path.exists(self._persistence_path):
+            log.error(f"Failed to save memory to {self.persistence_path}: {e}")
+            
+    def _cleanup_expired(self) -> None:
+        """Remove expired entries."""
+        now = _now()
+        if (now - self._last_cleanup).total_seconds() < 60:
             return
             
+        with self._lock:
+            while self._expiration_heap:
+                expiry_ts, key = self._expiration_heap[0]
+                if datetime.fromtimestamp(expiry_ts, timezone.utc) > now:
+                    break
+                    
+                self._expiration_heap.pop(0)
+                self._store.pop(key, None)
+                
+            self._last_cleanup = now
+            
+    def _calculate_entropy(self, value: Any) -> float:
+        """Calculate Shannon entropy of value."""
         try:
-            with open(self._persistence_path) as f:
-                snapshot: MemorySnapshot = json.load(f)
+            # Convert value to bytes for entropy calculation
+            if isinstance(value, str):
+                data = value.encode()
+            else:
+                data = json.dumps(value).encode()
                 
-            # Version check
-            if snapshot.get("version") != self.VERSION:
-                log.warning(
-                    "Memory snapshot version mismatch: %s != %s",
-                    snapshot.get("version"), self.VERSION
-                )
-                return
+            # Calculate frequency of each byte
+            freq = defaultdict(int)
+            for byte in data:
+                freq[byte] += 1
                 
-            with self._lock:
-                # Load configuration
-                self.max_entries = snapshot.get("max_entries", self.max_entries)
-                self.default_ttl_secs = snapshot.get("default_ttl_secs", self.default_ttl_secs)
+            # Calculate Shannon entropy
+            length = len(data)
+            entropy = 0.0
+            for count in freq.values():
+                p = count / length
+                entropy -= p * math.log2(p)
                 
-                # Load store with datetime conversion
-                self.store.clear()
-                now = datetime.now(timezone.utc)
-                
-                for key, entry in snapshot.get("store", {}).items():
-                    # Convert timestamp back to datetime
-                    try:
-                        entry["timestamp"] = datetime.fromisoformat(entry["timestamp"])
-                        # Skip expired entries
-                        if (now - entry["timestamp"]).total_seconds() > entry.get("ttl", self.default_ttl_secs):
-                            continue
-                        self.store[key] = entry
-                    except (ValueError, TypeError) as e:
-                        log.warning("Failed to load entry %s: %s", key, e)
-                        continue
-                
-                # Load expiration heap
-                self.expiration_heap = snapshot.get("expiration_heap", [])
-                # Clean expired entries from heap
-                now_ts = now.timestamp()
-                self.expiration_heap = [
-                    (t, k) for t, k in self.expiration_heap
-                    if t > now_ts and k in self.store
-                ]
-                heapq.heapify(self.expiration_heap)
-                
-                log.info(
-                    "Loaded %d entries from %s",
-                    len(self.store),
-                    self._persistence_path
-                )
-                
-        except Exception as e:
-            log.error("Failed to load memory state: %s", e, exc_info=True)
-            # Clear partial state
-            self.store.clear()
-            self.expiration_heap.clear()
-
-# RingStats
-class RingStats:
-    def __init__(self, maxlen: int):
-        if maxlen < 1:
-            raise ValueError("maxlen must be positive")
-        self.values: Deque[Tuple[float, float]] = deque(maxlen=maxlen)
-        self._ema: Optional[float] = None
-        self._alpha: Optional[float] = None
-
-    def push(self, value: float, t: Optional[datetime] = None) -> None:
-        if not isinstance(value, (int, float)):
-            raise ValueError("Value must be numeric")
-        t = t or datetime.now(timezone.utc)
-        self.values.append((t.timestamp(), float(value)))
-        # Invalidate EMA cache
-        self._ema = None
-
-    def ema(self, alpha: float = 0.3) -> float:
-        if not 0 < alpha < 1:
-            raise ValueError("Alpha must be between 0 and 1")
-        if not self.values:
+            return min(1.0, entropy / 8.0)  # Normalize to [0,1]
+            
+        except Exception:
             return 0.0
-        if self._ema is not None and self._alpha == alpha:
-            return self._ema
-        ema_val = self.values[0][1]
-        for _, v in list(self.values)[1:]:
-            ema_val = alpha * v + (1 - alpha) * ema_val
-        self._ema = float(ema_val)
-        self._alpha = alpha
-        return self._ema
+            
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+        """Set a value in memory with integrity tracking."""
+        now = _now()
+        ttl = ttl if ttl is not None else self.default_ttl_secs
+        
+        entry: MemoryEntry = {
+            "value": value,
+            "timestamp": now,
+            "weight": 1.0,
+            "entropy": self._calculate_entropy(value),
+            "ttl": ttl
+        }
+        
+        with self._lock:
+            # Check capacity
+            if len(self._store) >= self.max_entries and key not in self._store:
+                # Remove oldest entry
+                if self._expiration_heap:
+                    _, oldest_key = self._expiration_heap.pop(0)
+                    self._store.pop(oldest_key, None)
+                    
+            # Update entry
+            self._store[key] = entry
+            expiry_ts = (now + timedelta(seconds=ttl)).timestamp()
+            
+            # Update expiration heap
+            self._expiration_heap = [(ts, k) for ts, k in self._expiration_heap if k != key]
+            self._expiration_heap.append((expiry_ts, key))
+            self._expiration_heap.sort()
+            
+            # Periodic cleanup and persistence
+            self._cleanup_expired()
+            self._save_to_disk()
+            
+    def get(self, key: str) -> Optional[Any]:
+        """Get a value from memory."""
+        with self._lock:
+            entry = self._store.get(key)
+            if not entry:
+                return None
+                
+            # Check expiration
+            now = _now()
+            if (now - entry["timestamp"]).total_seconds() > entry["ttl"]:
+                self._store.pop(key, None)
+                return None
+                
+            return entry["value"]
+            
+    def audit(self) -> Dict[str, MemoryEntry]:
+        """Return copy of memory store with integrity info."""
+        self._cleanup_expired()
+        with self._lock:
+            return self._store.copy()
+            
+    def clear(self) -> None:
+        """Clear all entries."""
+        with self._lock:
+            self._store.clear()
+            self._expiration_heap.clear()
+            self._save_to_disk()
 
-    def slope(self) -> float:
-        n = len(self.values)
-        if n < 2:
-            return 0.0
-        xs = [x for x, _ in self.values]
-        ys = [y for _, y in self.values]
-        x_mean = sum(xs) / n
-        y_mean = sum(ys) / n
-        num = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
-        den = sum((x - x_mean) ** 2 for x in xs)
-        return float(num / max(den, 1e-6)) if den > 0 else 0.0
-
-    def minmax_norm(self) -> float:
-        if not self.values:
-            return 0.0
-        vals = [v for _, v in self.values]
-        vmin, vmax = min(vals), max(vals)
-        if abs(vmax - vmin) < 1e-6:
-            return 0.0
-        return float((vals[-1] - vmin) / (vmax - vmin))
-
-# Base Agent
-class AgentReport(TypedDict):
-    agent: str
-    ok: bool
-    diagnostics: Dict[str, str]
-    summary: str
-    influence: float
-    reliability: float
-    severity: float
-    details: Dict[str, Any]
-
-class AegisAgent(ABC):
+class BaseAgent(ABC):
+    """Base class for all agents."""
+    
     def __init__(self, name: str, memory: NexusMemory):
+        """Initialize agent."""
         self.name = name
         self.memory = memory
-
+        self._lock = threading.Lock()
+        
     @abstractmethod
-    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        ...
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process input data and return report."""
+        pass
 
-    def _safe_run(self, input_data: Dict[str, Any]) -> AgentReport:
-        started = datetime.utcnow().isoformat()
+class InputSanitizer:
+    """Validates and sanitizes input."""
+    
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """Initialize sanitizer with optional configuration.
+        
+        Args:
+            config: Optional configuration dictionary with the following keys:
+                max_length: Maximum allowed text length
+                max_line_length: Maximum allowed line length
+                max_depth: Maximum allowed JSON nesting depth
+                max_field_length: Maximum allowed field name length
+                banned_patterns: List of regex patterns to block
+                allowed_schemes: List of allowed URI schemes
+                trusted_domains: List of trusted domains
+        """
+        self.max_length = config.get("max_length", 10_000) if config else 10_000
+        self.max_line_length = config.get("max_line_length", 1_000) if config else 1_000
+        self.max_depth = config.get("max_depth", 10) if config else 10
+        self.max_field_length = config.get("max_field_length", 256) if config else 256
+        self.control_chars = set(range(0x00, 0x20)) - {0x09, 0x0A, 0x0D}  # Allow tab, LF, CR
+        
+        # Additional security patterns
+        self.banned_patterns = [re.compile(p) for p in (config.get("banned_patterns", []) if config else [])]
+        self.banned_patterns.extend([
+            re.compile(r"javascript:", re.I),  # Block javascript: URLs
+            re.compile(r"data:", re.I),       # Block data: URLs
+            re.compile(r"vbscript:", re.I),   # Block vbscript: URLs
+        ])
+        
+        # Security configurations
+        self.allowed_schemes = set(config.get("allowed_schemes", ["http", "https"]) if config else ["http", "https"])
+        self.trusted_domains = set(config.get("trusted_domains", []) if config else [])
+        
+    def _check_content_safety(self, content: str) -> Tuple[bool, List[str], List[str]]:
+        """Check content for potential security issues.
+        
+        Returns:
+            Tuple of (is_safe, issues, warnings)
+        """
+        issues = []
+        warnings = []
+        
+        # Check length
+        if len(content) > self.max_length:
+            issues.append("input_too_long")
+            return False, issues, warnings
+            
+        # Check line length
+        lines = content.splitlines()
+        long_lines = [i for i, line in enumerate(lines, 1) if len(line) > self.max_line_length]
+        if long_lines:
+            warnings.append(f"Lines {','.join(map(str, long_lines))} exceed max length")
+            
+        # Check control characters
+        control_chars = {c for c in content if ord(c) in self.control_chars}
+        if control_chars:
+            issues.append(f"control_chars_detected:{','.join(hex(ord(c)) for c in control_chars)}")
+            
+        # Check banned patterns
+        for pattern in self.banned_patterns:
+            if pattern.search(content):
+                issues.append(f"banned_pattern_matched:{pattern.pattern}")
+                
+        # Check for potential XSS/injection patterns
+        if re.search(r"<script|javascript:|onerror=|onload=", content, re.I):
+            issues.append("potential_xss_detected")
+            
+        # Check for suspicious shell commands
+        if re.search(r";\s*rm\s|;\s*del\s|;\s*chmod\s", content):
+            issues.append("suspicious_commands_detected")
+            
+        return not bool(issues), issues, warnings
+        
+    def _normalize_content(self, content: str) -> str:
+        """Normalize content for consistency."""
+        # Normalize Unicode representation
+        normalized = unicodedata.normalize("NFKC", content)
+        
+        # Normalize whitespace
+        normalized = re.sub(r"[ \t]+", " ", normalized)
+        normalized = re.sub(r"\r\n?|\n", "\n", normalized)
+        normalized = re.sub(r"\n\s+\n", "\n\n", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        
+        # Remove BOM if present
+        if normalized.startswith("\ufeff"):
+            normalized = normalized[1:]
+            
+        return normalized.strip()
+        
+    def _validate_json_structure(self, data: Any, depth: int = 0) -> Tuple[bool, List[str]]:
+        """Recursively validate JSON structure."""
+        issues = []
+        
+        # Check max depth
+        if depth > self.max_depth:
+            issues.append("max_depth_exceeded")
+            return False, issues
+            
+        if isinstance(data, dict):
+            # Check field names
+            for key in data:
+                if len(str(key)) > self.max_field_length:
+                    issues.append(f"field_name_too_long:{key[:50]}")
+                if not isinstance(key, str):
+                    issues.append("non_string_field_names")
+                    
+            # Recurse into values
+            for value in data.values():
+                ok, sub_issues = self._validate_json_structure(value, depth + 1)
+                issues.extend(sub_issues)
+                
+        elif isinstance(data, (list, tuple)):
+            # Recurse into sequence items
+            for item in data:
+                ok, sub_issues = self._validate_json_structure(item, depth + 1)
+                issues.extend(sub_issues)
+                
+        return not bool(issues), issues
+        
+    def audit_text(self, text: str) -> Dict[str, Any]:
+        """Audit text content with comprehensive validation.
+        
+        Args:
+            text: The text content to audit
+            
+        Returns:
+            Dictionary containing audit results:
+                safe: Boolean indicating if content is safe
+                issues: List of security/validation issues
+                warnings: List of non-critical warnings
+                normalized: Normalized version of input
+        """
+        result = {
+            "safe": True,
+            "issues": [],
+            "warnings": [],
+            "normalized": ""
+        }
+        
         try:
-            result = self.analyze(input_data)
-            ok = True
-            err = None
-        except (ValueError, TypeError, KeyError) as e:
-            log.exception("Agent %s failed: %s", self.name, e)
-            ok = False
-            result = {}
-            err = f"{type(e).__name__}: {e}"
-        finished = datetime.utcnow().isoformat()
+            if not text:
+                result["normalized"] = ""
+                return result
+                
+            # Basic content safety checks
+            is_safe, issues, warnings = self._check_content_safety(text)
+            result["safe"] = is_safe
+            result["issues"].extend(issues)
+            result["warnings"].extend(warnings)
+            
+            if not is_safe:
+                return result
+                
+            # Try to parse as JSON for additional validation
+            try:
+                json_data = json.loads(text)
+                is_valid, json_issues = self._validate_json_structure(json_data)
+                if not is_valid:
+                    result["warnings"].extend(json_issues)
+            except json.JSONDecodeError:
+                # Not JSON, continue with text validation
+                pass
+                
+            # Normalize content
+            result["normalized"] = self._normalize_content(text)
+            
+            # URL safety checks if content contains URLs
+            urls = re.finditer(r'https?://[^\s<>"]+|www\.[^\s<>"]+', text)
+            for url in urls:
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(url.group())
+                    if parsed.scheme and parsed.scheme not in self.allowed_schemes:
+                        result["issues"].append(f"disallowed_scheme:{parsed.scheme}")
+                        result["safe"] = False
+                    if parsed.netloc and self.trusted_domains and parsed.netloc not in self.trusted_domains:
+                        result["warnings"].append(f"untrusted_domain:{parsed.netloc}")
+                except Exception:
+                    result["warnings"].append("invalid_url_format")
+                    
+        except Exception as e:
+            result["issues"].append(f"sanitization_error:{str(e)}")
+            result["safe"] = False
+            
+        return result
+
+class AegisTimescales:
+    """Multi-timescale diagnostic system coordinator."""
+    
+    def __init__(self, timeout_sec: float = 30.0, policy_path: Optional[str] = None):
+        """Initialize coordinator with optional policy configuration.
+        
+        Args:
+            timeout_sec: Maximum time to wait for agent responses
+            policy_path: Optional path to custom policy configuration file
+        """
+        self._timeout_sec = timeout_sec
+        self._initialize_state()
+        self._memory = {}
+        self._memory_lock = threading.Lock()
+        self._agents = {}
+        self.policy_path = policy_path
+        
+    def add_agent(self, name: str, agent: Any) -> None:
+        """Add an agent."""
+        if not hasattr(agent, "process"):
+            raise ValueError(f"Agent {name} must have process() method")
+        self._agents[name] = agent
+        
+    @property 
+    def agents(self) -> Dict[str, Any]:
+        """Get registered agents."""
+        return self._agents.copy()
+        
+    def _initialize_state(self) -> None:
+        """Reset system state."""
+        self._risk = 0.0
+        self._severity = 0.0
+        self._conflict = 0.0
+        self._timescale = 0.0
+        self._stress = 0.0
+        
+    def _process_metrics(self, details: Dict[str, Any], input_data: Dict[str, Any]) -> None:
+        """Process metrics from agent report."""
+        # Severity
+        severity_values = []
+        for key in ["severity", "severity_now"]:
+            if key in details:
+                try:
+                    val = float(details[key])
+                    if val >= 0:
+                        severity_values.append(val)
+                except (ValueError, TypeError):
+                    continue
+        
+        if severity_values:
+            self._severity = max(self._severity, max(severity_values))
+            
+        # Stress signals
+        agent_stress = float(details.get("stress", details.get("operator_stress", 0.0)) or 0.0)
+        signal_stress = float(input_data.get("_signals", {}).get("bio", {}).get("stress", 0.0))
+        env_stress = float(input_data.get("_signals", {}).get("env", {}).get("stress", 0.0))
+        input_stress = float(input_data.get("stress", input_data.get("operator_stress", 0.0)) or 0.0)
+        
+        self._stress = max(
+            self._stress,
+            agent_stress, 
+            signal_stress,
+            env_stress,
+            input_stress
+        )
+        
+        # Risk signals
+        agent_risk = float(details.get("context_risk", details.get("risk", 0.0)) or 0.0)
+        signal_risk = float(input_data.get("_signals", {}).get("env", {}).get("context_risk", 0.0))
+        
+        self._risk = max(
+            self._risk,
+            agent_risk,
+            signal_risk,
+            float(input_data.get("risk", 0.0) or 0.0)
+        )
+        
+        # Conflict and timescale
+        curr_conflict = float(details.get("conflict", input_data.get("conflict", 0.0)) or 0.0)
+        self._conflict = max(self._conflict, curr_conflict)
+        
+        curr_timescale = float(details.get("timescale_signal", details.get("caution_fused", 0.0)) or 0.0)
+        self._timescale = max(self._timescale, curr_timescale)
+        
+    def _make_decision(self) -> str:
+        """Make final decision based on policy thresholds."""
+        # Apply policy thresholds
+        policy = self._load_policy()
+        
+        # Risk thresholds
+        risk_block = policy.get("thresholds", {}).get("risk_block", 0.8)
+        risk_caution = policy.get("thresholds", {}).get("risk_caution", 0.5)
+        
+        # Severity thresholds
+        severity_block = policy.get("thresholds", {}).get("severity_block", 0.8)
+        severity_caution = policy.get("thresholds", {}).get("severity_caution", 0.5)
+        
+        # Conflict thresholds
+        conflict_block = policy.get("thresholds", {}).get("conflict_block", 0.8)
+        conflict_caution = policy.get("thresholds", {}).get("conflict_caution", 0.5)
+        
+        # Timescale thresholds
+        timescale_block = policy.get("thresholds", {}).get("timescale_block", 0.8)
+        timescale_caution = policy.get("thresholds", {}).get("timescale_caution", 0.5)
+        
+        # Stress thresholds
+        stress_block = policy.get("thresholds", {}).get("stress_block", 0.8)
+        stress_caution = policy.get("thresholds", {}).get("stress_caution", 0.5)
+        
+        # Apply blocking rules
+        if any([
+            self._risk > risk_block,
+            self._severity > severity_block,
+            self._conflict > conflict_block,
+            self._timescale > timescale_block,
+            self._stress > stress_block
+        ]):
+            return "BLOCK"
+            
+        # Apply caution rules
+        if any([
+            self._risk > risk_caution,
+            self._severity > severity_caution,
+            self._conflict > conflict_caution,
+            self._timescale > timescale_caution,
+            self._stress > stress_caution
+        ]):
+            return "CAUTION"
+            
+        return "ALLOW"
+        
+    def _load_policy(self) -> Dict[str, Any]:
+        """Load policy configuration."""
+        # Default policy thresholds
+        default_policy = {
+            "thresholds": {
+                "risk_block": 0.8,
+                "risk_caution": 0.5,
+                "severity_block": 0.8,
+                "severity_caution": 0.5,
+                "conflict_block": 0.8,
+                "conflict_caution": 0.5,
+                "timescale_block": 0.8,
+                "timescale_caution": 0.5,
+                "stress_block": 0.8,
+                "stress_caution": 0.5
+            },
+            "weights": {
+                "risk": 1.0,
+                "severity": 1.0,
+                "conflict": 0.8,
+                "timescale": 0.7,
+                "stress": 0.6
+            }
+        }
+        
+        try:
+            # Try to load custom policy if configured
+            if hasattr(self, "policy_path") and self.policy_path:
+                with open(self.policy_path, "r") as f:
+                    custom_policy = json.load(f)
+                    # Deep merge with defaults
+                    self._deep_merge(default_policy, custom_policy)
+        except Exception as e:
+            log.warning(f"Failed to load custom policy: {e}")
+            
+        return default_policy
+        
+    def _deep_merge(self, target: Dict, source: Dict) -> None:
+        """Deep merge source dict into target dict."""
+        for key, value in source.items():
+            if key in target and isinstance(target[key], dict) and isinstance(value, dict):
+                self._deep_merge(target[key], value)
+            else:
+                target[key] = value
+        
+    def _sanitize_input(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Sanitize and validate input."""
+        if not isinstance(input_data, dict):
+            raise ValueError("Input must be a dictionary")
+            
+        sanitized = input_data.copy()
+        audit = {"issues": [], "safe": True}
+        
+        content = json.dumps(sanitized)
+        if len(content) > 32768:
+            audit["issues"].append("length_exceeded") 
+            audit["safe"] = False
+            
+        if any(unicodedata.category(c).startswith("C") for c in content):
+            audit["issues"].append("control_chars")
+            audit["safe"] = False
+            
+        sanitized["_audit"] = audit
+        return sanitized
+        
+    def dispatch(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch input to agents.
+        
+        Args:
+            input_data: Input to process
+            
+        Returns:
+            Processing results
+        """
+        def process_agent(agent: Any, name: str, data: Dict[str, Any]) -> Dict[str, Any]:
+            """Execute agent with error handling."""
+            try:
+                result = agent.process(data)
+                result["agent"] = name
+                return result
+            except Exception as e:
+                log.error(f"Agent {name} failed: {e}")
+                return {
+                    "agent": name,
+                    "ok": False,
+                    "error": str(e)
+                }
+        
+        def process_result(result: Dict[str, Any], reports: List[Dict], edges: List[Dict]) -> None:
+            """Process agent result."""
+            if not isinstance(result, dict):
+                raise ValueError("Invalid agent result")
+                
+            reports.append(result)
+            details = result.get("details", {})
+            
+            self._process_metrics(details, input_data)
+            if "edges" in details:
+                edges.extend(details["edges"])
+                
+        # Validate input
+        if not isinstance(input_data, dict):
+            return {
+                "reports": [],
+                "input_audit": {"issues": ["invalid_input"]},
+                "decision": "BLOCK"
+            }
+            
+        # Reset state
+        self._initialize_state()
+        reports: List[Dict] = []
+        edges: List[Dict] = []
+        
+        try:
+            # Sanitize input
+            sanitized = self._sanitize_input(input_data)
+            audit = sanitized.pop("_audit", {})
+            
+            if not audit.get("safe", False):
+                return {
+                    "reports": [],
+                    "input_audit": audit,
+                    "decision": "BLOCK"
+                }
+                
+            # Process agents in parallel
+            with ThreadPoolExecutor(max_workers=len(self.agents)) as executor:
+                futures = {
+                    executor.submit(process_agent, agent, name, sanitized): name
+                    for name, agent in self.agents.items()
+                }
+                
+                # Handle results
+                for future in as_completed(futures):
+                    try:
+                        result = future.result(timeout=self._timeout_sec)
+                        process_result(result, reports, edges)
+                    except Exception as e:
+                        name = futures[future]
+                        reports.append({
+                            "agent": name,
+                            "ok": False,
+                            "error": str(e)
+                        })
+                        
+            # Build response
+            decision = self._make_decision()
+            response = {
+                "reports": reports,
+                "input_audit": audit,
+                "memory_snapshot": {},
+                "explainability_graph": {
+                    "edges": edges,
+                    "nodes": sorted({e["from"] for e in edges} | 
+                                {e["to"] for e in edges})
+                }
+            }
+            
+            # Update MetaJudge
+            for report in reports:
+                if report.get("agent") == "MetaJudge":
+                    report["details"]["decision"] = decision
+                    break
+                    
+            return response
+            
+        except Exception as e:
+            log.error(f"Council dispatch failed: {e}")
+            return {
+                "reports": [],
+                "input_audit": {"issues": [str(e)]},
+                "decision": "BLOCK"
+            }
+            
+    def save_memory(self, key: str, value: Any) -> None:
+        """Save to memory."""
+        with self._memory_lock:
+            self._memory[key] = value
+            
+    def load_memory(self, key: str) -> Optional[Any]:
+        """Load from memory."""
+        with self._memory_lock:
+            return self._memory.get(key)
+            
+    def clear_memory(self) -> None:
+        """Clear all memory."""
+        with self._memory_lock:
+            self._memory.clear()
+
+class EchoSeedAgent(BaseAgent):
+    """Initial seed agent that processes raw input."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Echo input data with length-based severity."""
+        text = str(input_data.get("text", ""))
+        len_severity = min(1.0, len(text) / 1000)
+        
+        details = {
+            "len_s": len_severity,
+            "sev_proxy": 0.2 + (0.8 * len_severity)
+        }
+        
         return {
             "agent": self.name,
-            "ok": ok,
-            "diagnostics": {"started": started, "finished": finished, "error": err},
-            "summary": result.get("summary", ""),
-            "influence": float(result.get("influence", 0.0)),
-            "reliability": float(result.get("reliability", 0.5)),
-            "severity": float(result.get("severity", 0.0)),
-            "details": result.get("details", {})
-        }
-
-# Agents
-class EchoSeedAgent(AegisAgent):
-    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        text = str(input_data.get("text", ""))
-        audit = InputSanitizer.audit_text(text)
-        L = len(audit["normalized"])
-        len_s = min(1.0, L / 1000.0)  # Adjusted to 1000 chars for broader applicability
-        sev_proxy = 0.2 + 0.6 * len_s
-        self.memory.write(f"{self.name}:seed", {"len_s": round(len_s, 4), "sev_proxy": round(sev_proxy, 4)},
-                         weight=0.6, entropy=0.25, ttl_secs=3600)
-        return {
-            "summary": "Echo seed (length-based severity proxy)",
-            "influence": 0.15 + 0.2 * len_s,
-            "reliability": 0.9,
-            "severity": sev_proxy,
-            "details": {"len_s": round(len_s, 4), "sev_proxy": round(sev_proxy, 4)}
-        }
-
-class ShortTermAgent(AegisAgent):
-    def __init__(self, name: str, memory: NexusMemory):
-        super().__init__(name, memory)
-        self.buf = RingStats(maxlen=64)
-
-    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        text = str(input_data.get("text", ""))
-        stress = max(0.0, min(1.0, float(input_data.get("_now_stress", 0.0))))
-        risk = max(0.0, min(1.0, float(input_data.get("_now_risk", 0.0))))
-        L = len(InputSanitizer.normalize(text))
-        len_s = min(1.0, L / 1000.0)  # Configurable length scale
-        urgency = min(1.0, 0.5 * len_s + 0.3 * stress + 0.2 * risk)
-        severity = min(1.0, 0.6 * stress + 0.4 * risk)
-        self.buf.push(severity)
-        self.memory.write(f"{self.name}:now", {
-            "len_s": round(len_s, 4), "stress": round(stress, 4), "risk": round(risk, 4),
-            "urgency_now": round(urgency, 4), "severity_now": round(severity, 4)
-        }, weight=0.7, entropy=0.25, ttl_secs=1800)
-        return {
-            "summary": "Short-term urgency assessment",
-            "influence": 0.35 + 0.4 * urgency,
-            "reliability": 0.9,
-            "severity": severity,
-            "details": {"urgency_now": round(urgency, 4), "severity_now": round(severity, 4)}
-        }
-
-class MidTermAgent(AegisAgent):
-    def __init__(self, name: str, memory: NexusMemory):
-        super().__init__(name, memory)
-        self.sev_buf = RingStats(maxlen=256)
-        self.str_buf = RingStats(maxlen=256)
-
-    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        sev = max(0.0, min(1.0, float(input_data.get("_sev_now", 0.0))))
-        stress = max(0.0, min(1.0, float(input_data.get("_now_stress", 0.0))))
-        self.sev_buf.push(sev)
-        self.str_buf.push(stress)
-        sev_ema = self.sev_buf.ema(alpha=0.25)
-        str_ema = self.str_buf.ema(alpha=0.25)
-        sev_slope = self.sev_buf.slope()
-        slope_sig = 0.5 * (math.tanh(sev_slope * 3600.0) + 1.0)  # Per-hour sensitivity
-        forecast = min(1.0, 0.6 * sev_ema + 0.4 * str_ema)
-        influence = 0.25 + 0.5 * forecast + 0.2 * slope_sig
-        payload = {
-            "sev_ema": round(sev_ema, 4), "stress_ema": round(str_ema, 4),
-            "sev_slope": round(sev_slope, 6), "trend_rising": round(slope_sig, 4),
-            "forecast_mid": round(forecast, 4)
-        }
-        self.memory.write(f"{self.name}:mid", payload, weight=0.8, entropy=0.2, ttl_secs=24*3600)
-        return {
-            "summary": "Mid-term trend and forecast",
-            "influence": influence,
-            "reliability": 0.9,
-            "severity": forecast,
-            "details": payload
-        }
-
-class LongTermArchivistAgent(AegisAgent):
-    def __init__(self, name: str, memory: NexusMemory):
-        super().__init__(name, memory)
-        self.drift_buf = RingStats(maxlen=1024)
-
-    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        audit = self.memory.audit()
-        integrities = [rec["integrity"] for rec in audit.values() if isinstance(rec, dict) and "integrity" in rec]
-        avg_integrity = sum(integrities) / max(1, len(integrities))
-        decision = str(input_data.get("_last_decision", "PROCEED")).upper()
-        sev_now = max(0.0, min(1.0, float(input_data.get("_sev_now", 0.0))))
-        comp = min(1.0, max(0.0, 0.7 * (1.0 - avg_integrity) + 0.3 * sev_now))
-        self.drift_buf.push(comp)
-        comp_ema = self.drift_buf.ema(alpha=0.1)
-        slope = self.drift_buf.slope()
-        slope_sig = 0.5 * (math.tanh(slope * 24 * 3600.0) + 1.0)  # Per-day sensitivity
-        proceed_bias = 1.0 if decision == "PROCEED" else 0.0
-        drift = min(1.0, 0.5 * comp_ema + 0.3 * slope_sig + 0.2 * proceed_bias * max(0.0, comp_ema - 0.4))
-        influence = 0.2 + 0.6 * drift
-        payload = {
-            "avg_memory_integrity": round(avg_integrity, 4),
-            "comp_ema": round(comp_ema, 4), "drift_slope": round(slope, 6),
-            "drift_signal": round(slope_sig, 4), "decision_bias": proceed_bias,
-            "drift_long": round(drift, 4)
-        }
-        self.memory.write(f"{self.name}:long", payload, weight=0.9, entropy=0.12, ttl_secs=7*24*3600)
-        return {
-            "summary": "Long-term drift monitoring",
-            "influence": influence,
-            "reliability": 0.92,
-            "severity": drift,
-            "details": payload
-        }
-
-# TimeScaleCoordinator
-class TimeScaleCoordinator(AegisAgent):
-    def __init__(self, name: str, memory: NexusMemory):
-        super().__init__(name, memory)
-
-    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        reports: List[AgentReport] = input_data.get("_agent_reports", [])
-        st = next((r for r in reports if r.get("agent") == "ShortTermAgent" and r.get("ok")), None)
-        mt = next((r for r in reports if r.get("agent") == "MidTermAgent" and r.get("ok")), None)
-        lt = next((r for r in reports if r.get("agent") == "LongTermArchivist" and r.get("ok")), None)
-        st_urg = float(st["details"].get("urgency_now", 0.0)) if st else 0.0
-        mt_fore = float(mt["details"].get("forecast_mid", 0.0)) if mt else 0.0
-        mt_rise = float(mt["details"].get("trend_rising", 0.0)) if mt else 0.0
-        lt_drift = float(lt["details"].get("drift_long", 0.0)) if lt else 0.0
-        w_short, w_mid, w_long = 0.5, 0.3, 0.2
-        w_long += min(0.3, 0.3 * lt_drift)
-        w_mid += min(0.2, 0.2 * mt_rise)
-        w_short = max(0.1, w_short - 0.3 * lt_drift)  # Ensure short-term weight doesn't drop too low
-        total = max(1e-6, w_short + w_mid + w_long)
-        w_short, w_mid, w_long = w_short / total, w_mid / total, w_long / total
-        caution = min(1.0, max(0.0, w_short * (1.0 - st_urg) + w_mid * mt_fore + w_long * lt_drift))
-        severity = min(1.0, 0.4 * mt_fore + 0.6 * lt_drift)
-        influence = 0.3 + 0.6 * caution
-        details = {
-            "weights": {"short": round(w_short, 4), "mid": round(w_mid, 4), "long": round(w_long, 4)},
-            "st_urgency": round(st_urg, 4), "mt_forecast": round(mt_fore, 4),
-            "mt_trend_rising": round(mt_rise, 4), "lt_drift": round(lt_drift, 4),
-            "caution_fused": round(caution, 4)
-        }
-        self.memory.write(f"{self.name}:fusion", details, weight=0.95, entropy=0.1, ttl_secs=24*3600)
-        return {
-            "summary": "Timescale fusion (short/mid/long)",
-            "influence": influence,
-            "reliability": 0.94,
-            "severity": severity,
             "details": details,
-            "explain_edges": [
-                {"from": "ShortTermAgent", "to": self.name, "weight": round(w_short, 4)},
-                {"from": "MidTermAgent", "to": self.name, "weight": round(w_mid, 4)},
-                {"from": "LongTermArchivist", "to": self.name, "weight": round(w_long, 4)},
-            ]
+            "ok": True
         }
 
-# Meta-Judge
-
-class MetaJudgeAgent(AegisAgent):
-    def __init__(self, name: str, memory: NexusMemory, decision_policies: Optional[Dict[str, float]] = None):
-        super().__init__(name, memory)
-        self.policies = decision_policies or {
-            "risk_cap": 0.75,
-            "min_integrity": 0.2,
-            "stress_cap": 0.75,
-            "timescale_cap": 0.65
-        }
-
-    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        reports = input_data.get("_agent_reports", []) or []
-        valid = [r for r in reports if r.get("ok")]
+class ShortTermAgent(BaseAgent):
+    """Handles immediate context analysis."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process immediate context."""
+        text = str(input_data.get("text", ""))
+        intent = str(input_data.get("intent", ""))
         
-        # Calculate weighted severity using influence × reliability
-        severity_weights = []
-        total_weight = 0.0
-        severity = 0.0
+        urgency_words = {"now", "asap", "urgent", "immediately", "rush"}
+        found_urgent = any(w in text.lower() or w in intent.lower() 
+                        for w in urgency_words)
         
-        for r in valid:
-            influence = float(r.get("influence", 0.0))
-            reliability = float(r.get("reliability", 0.0))
-            r_severity = float(r.get("severity", 0.0))
-            weight = influence * reliability
-            
-            severity_weights.append((r_severity, weight))
-            total_weight += weight
-        
-        if severity_weights:
-            # Normalize weights and calculate weighted average
-            severity = sum(s * (w / total_weight) for s, w in severity_weights)
-            # Clamp to [0,1]
-            severity = max(0.0, min(1.0, severity))
-        
-        # Weighted influence index for visualization
-        weights = [(r.get("agent",""), float(r.get("influence",0.0))*float(r.get("reliability",0.0))) 
-                  for r in valid]
-        total_w = sum(w for _, w in weights) or 1.0
-
-        # Pull upstream details
-        stress = 0.0; risk = 0.0; conflict = 0.0; timescale = 0.0
-        for r in valid:
-            d = r.get("details", {}) or {}
-            stress = max(stress, float(d.get("stress", d.get("operator_stress", 0.0)) or 0.0))
-            risk = max(risk, float(d.get("context_risk", d.get("risk", 0.0)) or 0.0))
-            conflict = max(conflict, float(d.get("conflict", 0.0) or 0.0))
-            timescale = max(timescale, float(d.get("timescale_signal", d.get("caution_fused", 0.0)) or 0.0))
-
-        # Memory integrity snapshot
-        mem_audit = self.memory.audit()
-        integrities = [rec.get("integrity", 1.0) for rec in mem_audit.values()] or [1.0]
-        avg_integrity = sum(integrities)/len(integrities)
-
-        # Policy checks
-        cautious = (
-            severity > self.policies["risk_cap"] or
-            avg_integrity < self.policies["min_integrity"] or
-            stress > self.policies.get("stress_cap", 0.65) or
-            conflict > 0.5 or
-            timescale > self.policies.get("timescale_cap", 0.55)
-        )
-        block = (
-            risk > 0.9 or
-            (conflict > 0.92 and stress > 0.8) or
-            timescale > 0.9 or
-            avg_integrity < max(0.05, self.policies["min_integrity"] * 0.5)
-        )
-        if block:
-            decision = "BLOCK"
-        else:
-            decision = "PROCEED_WITH_CAUTION" if cautious else "PROCEED"
-
-        graph_edges = [{"from": a, "to": self.name, "weight": round(w/total_w, 4)} for a, w in weights]
-
         details = {
-            "severity_total": round(severity,4),
-            "avg_memory_integrity": round(avg_integrity,4),
-            "stress": round(stress,4),
-            "context_risk": round(risk,4),
-            "conflict": round(conflict,4),
-            "timescale_signal": round(timescale,4),
-            "policy": self.policies,
-            "decision": decision,
-            "explain_edges": graph_edges
+            "urgency_now": 0.8 if found_urgent else 0.0,
+            "severity_now": 0.0
         }
-        self.memory.write(f"{self.name}:decision", details, weight=0.95, entropy=0.1, ttl_secs=3600)
+        
         return {
-            "summary": f"Arbitrated {len(valid)} reports",
-            "influence": 1.0,
-            "reliability": 0.95,
-            "severity": severity,
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+
+class MidTermAgent(BaseAgent):
+    """Handles medium-term trend analysis."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process medium-term trends."""
+        stress_hist = []
+        try:
+            mem_entries = self.memory.audit()
+            for entry in mem_entries.values():
+                if "stress" in str(entry.get("value", "")):
+                    stress_hist.append(float(entry.get("stress", 0.0)))
+        except:
+            pass
+            
+        stress_ema = sum(stress_hist[-5:]) / max(1, len(stress_hist[-5:])) if stress_hist else 0.0
+        
+        details = {
+            "stress_ema": stress_ema,
+            "sev_ema": 0.0,
+            "sev_slope": 0.0,
+            "forecast_mid": 0.0
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+
+class LongTermArchivistAgent(BaseAgent):
+    """Maintains long-term memory and context."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process long-term context."""
+        mem_audit = self.memory.audit()
+        integrities = [rec.get("integrity", 1.0) for rec in mem_audit.values()]
+        avg_integrity = sum(integrities)/max(1, len(integrities))
+        
+        drift_long = 0.3 + (0.7 * (1.0 - avg_integrity))
+        
+        details = {
+            "avg_memory_integrity": avg_integrity,
+            "drift_long": drift_long,
+            "decision_bias": 1.0,
+            "comp_ema": drift_long
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+
+class BiofeedbackAgent(BaseAgent):
+    """Processes biometric signals."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process biometric signals."""
+        bio = input_data.get("_signals", {}).get("bio", {})
+        
+        hr = float(bio.get("heart_rate", 60))
+        hr_s = min(1.0, max(0.0, (hr - 60) / 60))
+        
+        hrv = float(bio.get("hrv", 50))
+        hrv_s = min(1.0, max(0.0, 1.0 - (hrv / 50)))
+        
+        gsr = float(bio.get("gsr", 5))
+        gsr_s = min(1.0, max(0.0, gsr / 15))
+        
+        voice = float(bio.get("voice_tension", 0.0))
+        
+        stress = max(
+            hr_s,
+            hrv_s,
+            gsr_s,
+            voice,
+            float(bio.get("stress", 0.0))
+        )
+        
+        details = {
+            "hr_s": hr_s,
+            "hrv_s": hrv_s,
+            "gsr_s": gsr_s,
+            "voice_s": voice,
+            "operator_stress": stress
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+
+class EnvSignalAgent(BaseAgent):
+    """Processes environmental context signals."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process environmental signals."""
+        env = input_data.get("_signals", {}).get("env", {})
+        
+        details = {
+            "context_risk": float(env.get("context_risk", 0.0)),
+            "incident_sev": float(env.get("incident_sev", 0.0)),
+            "market_vol": float(env.get("market_volatility", 0.0)),
+            "network_anom": float(env.get("network_anomalies", 0.0))
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+
+class ContextConflictAgent(BaseAgent):
+    """Detects conflicts between intent and context."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process context conflicts."""
+        text = str(input_data.get("text", ""))
+        intent = str(input_data.get("intent", ""))
+        
+        rush_words = {"fast", "quick", "hurry", "rush"}
+        caution_words = {"careful", "safe", "slow", "check"}
+        
+        rush = any(w in text.lower() or w in intent.lower() for w in rush_words)
+        caution = any(w in text.lower() or w in intent.lower() for w in caution_words)
+        
+        conflict = 0.8 if (rush and caution) else 0.0
+        
+        details = {
+            "intent_conflict": conflict,
+            "confidence": 0.8
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+
+class TimeScaleCoordinator(BaseAgent):
+    """Coordinates short/mid/long term signals."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Coordinate timescale signals."""
+        last_decision = str(input_data.get("_last_decision", "PROCEED"))
+        
+        caution_signal = 0.0
+        if last_decision == "PROCEED_WITH_CAUTION":
+            caution_signal = 0.4
+        elif last_decision == "BLOCK":
+            caution_signal = 0.8
+            
+        edges = []
+        for agent in ["ShortTerm", "MidTerm", "LongArchivist"]:
+            edges.append({
+                "from": agent,
+                "to": "MetaJudge",
+                "weight": 0.33
+            })
+            
+        details = {
+            "caution_fused": caution_signal,
+            "edges": edges
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+
+class MetaJudgeAgent(BaseAgent):
+    """Final decision coordination."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process final decision."""
+        all_edges = []
+        for agent in ["EchoSeed", "ShortTerm", "MidTerm", "LongArchivist",
+                     "BiofeedbackAgent", "EnvSignalAgent", "ContextConflictAgent"]:
+            all_edges.append({
+                "from": agent,
+                "to": self.name,
+                "weight": 0.3
+            })
+            
+        details = {
+            "decision": "PROCEED",
+            "edges": all_edges
+        }
+        
+        return {
+            "agent": self.name,
             "details": details,
             "ok": True
         }
 
 class AegisCouncil:
-    def __init__(self, per_agent_timeout_sec: float = 2.5):
-        self.memory = NexusMemory()
-        self.agents: List[AegisAgent] = []
-        self.per_agent_timeout_sec = per_agent_timeout_sec
-        self.max_workers = max(1, os.cpu_count() or 1) * 2
+    """Core coordination for the Aegis diagnostic system."""
 
-    def register_agent(self, agent: AegisAgent) -> None:
-        self.agents.append(agent)
-
-    def dispatch(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        self.memory.purge_expired()
-        if "text" in input_data and isinstance(input_data["text"], str):
-            audit = InputSanitizer.audit_text(input_data["text"])
-            input_data = {**input_data, "text": audit["normalized"], "_input_audit": audit}
-        non_meta = [a for a in self.agents if not isinstance(a, (MetaJudgeAgent, TimeScaleCoordinator))]
-        coordinator = [a for a in self.agents if isinstance(a, TimeScaleCoordinator)]
-        meta = [a for a in self.agents if isinstance(a, MetaJudgeAgent)]
-        reports = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {pool.submit(a._safe_run, input_data): a.name for a in non_meta}
-            for fut in as_completed(futures):
-                try:
-                    rep = fut.result(timeout=self.per_agent_timeout_sec)
-                except TimeoutError as e:
-                    agent_name = futures[fut]
-                    log.error("Agent %s timed out after %s seconds", agent_name, self.per_agent_timeout_sec)
-                    rep = {
-                        "agent": agent_name,
-                        "ok": False,
-                        "summary": "",
-                        "influence": 0.0,
-                        "reliability": 0.0,
-                        "severity": 0.0,
-                        "details": {},
-                        "diagnostics": {"started": "", "finished": "", "error": f"TimeoutError: {e}"}
-                    }
-                except Exception as e:
-                    agent_name = futures[fut]
-                    log.exception("Agent %s failed: %s", agent_name, e)
-                    rep = {
-                        "agent": agent_name,
-                        "ok": False,
-                        "summary": "",
-                        "influence": 0.0,
-                        "reliability": 0.0,
-                        "severity": 0.0,
-                        "details": {},
-                        "diagnostics": {"started": "", "finished": "", "error": f"PoolError: {e}"}
-                    }
-                reports.append(rep)
-        if "_sev_now" not in input_data:
-            sev_now = max(float(r.get("severity", 0.0)) for r in reports if r.get("ok")) if reports else 0.0
-            input_data["_sev_now"] = sev_now
-        for a in coordinator:
-            input_data["_agent_reports"] = reports
-            reports.append(a._safe_run(input_data))
-        for mj in meta:
-            mj_input = {**input_data, "_agent_reports": reports}
-            reports.append(mj._safe_run(mj_input))
-        explain_edges = []
-        for r in reports:
-            edges = r.get("details", {}).get("explain_edges")
-            if isinstance(edges, list):
-                explain_edges.extend(edges)
-        return {
-            "input_audit": input_data.get("_input_audit", {}),
-            "reports": reports,
-            "explainability_graph": {"nodes": [a.name for a in self.agents], "edges": explain_edges},
-            "memory_snapshot": self.memory.audit()
-        }
-
-# Demo
-if __name__ == "__main__":
-    council = AegisCouncil(per_agent_timeout_sec=2.5)
-    council.register_agent(EchoSeedAgent("EchoSeedAgent", council.memory))
-    council.register_agent(ShortTermAgent("ShortTermAgent", council.memory))
-    council.register_agent(MidTermAgent("MidTermAgent", council.memory))
-    council.register_agent(LongTermArchivistAgent("LongTermArchivist", council.memory))
-    council.register_agent(TimeScaleCoordinator("TimeScaleCoordinator", council.memory))
-    council.register_agent(MetaJudgeAgent("MetaJudge", council.memory))
-    sample_inputs = [
-        {"text": "Proceed with care. Audit logs, then continue.", "_now_stress": 0.25, "_now_risk": 0.2},
-        {"text": "Incident trending up. Protect users. Consider pause.", "_now_stress": 0.45, "_now_risk": 0.35},
-        {"text": "Signals mixed; ship small fix under feature flag.", "_now_stress": 0.35, "_now_risk": 0.3},
-        {"text": "Escalation observed; slow rollout and increase monitoring.", "_now_stress": 0.6, "_now_risk": 0.55},
-    ]
-    last_decision = "PROCEED"
-    for i, inp in enumerate(sample_inputs, 1):
-        inp["_last_decision"] = last_decision
-        out = council.dispatch(inp)
-        mj = next((r for r in out["reports"] if r.get("agent") == "MetaJudge"), {})
-        last_decision = mj.get("details", {}).get("decision", last_decision)
-        print(f"--- Call {i} decision: {last_decision} ---")
-        print(json.dumps({
-            "fusion": next((r for r in out["reports"] if r.get("agent") == "TimeScaleCoordinator"), {}),
-            "meta": mj
-        }, indent=2, default=str))
-
-# ---------------- Fusion Agents (Bio/Env/Conflict) ----------------
-class BiofeedbackAgent(AegisAgent):
-    """
-    Fuses operator vitals and voice tension into 0..1 stress.
-    Expects input_data["_signals"]["bio"] or uses safe defaults.
-    """
-    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        bio = (input_data.get("_signals", {}) or {}).get("bio", {}) or {}
-        hr = float(bio.get("heart_rate", 78.0))        # bpm
-        hrv = float(bio.get("hrv", 38.0))              # ms
-        gsr = float(bio.get("gsr", 6.0))               # arbitrary microsiemens proxy
-        vt  = float(bio.get("voice_tension", 0.3))     # 0..1
-        # Normalize
-        hr_s  = min(1.0, max(0.0, (hr - 55.0) / 65.0))
-        hrv_s = 1.0 - min(1.0, max(0.0, (hrv - 20.0) / 80.0))
-        gsr_s = min(1.0, max(0.0, (gsr - 2.0) / 18.0))
-        vt_s  = min(1.0, max(0.0, vt))
-        stress = float(bio.get('stress', None)) if bio.get('stress', None) is not None else min(1.0, max(0.0, 0.35*hr_s + 0.25*hrv_s + 0.2*gsr_s + 0.2*vt_s))
-        payload = {"operator_stress": round(stress,4), "hr_s": round(hr_s,4),
-                   "hrv_s": round(hrv_s,4), "gsr_s": round(gsr_s,4), "vt_s": round(vt_s,4)}
-        self.memory.write(f"{self.name}:stress", payload, weight=0.8, entropy=0.2, ttl_secs=1800)
-        return {"summary":"Biofeedback fused", "influence": 0.25 + 0.5*stress,
-                "reliability": 0.9, "severity": stress, "details": {"stress": stress, **payload}, "ok": True}
-
-class EnvSignalAgent(AegisAgent):
-    """
-    Fuses environmental context to 0..1 risk.
-    Expects input_data["_signals"]["env"] with incident_sev, weather_sev, network_anom, market_vol.
-    """
-    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        env = (input_data.get("_signals", {}) or {}).get("env", {}) or {}
-        incident = float(env.get("incident_sev", 0.0))
-        weather  = float(env.get("weather_sev", 0.0))
-        network  = float(env.get("network_anom", 0.0))
-        market   = float(env.get("market_vol", 0.0))
-        risk = float(env.get('context_risk', None)) if env.get('context_risk', None) is not None else min(1.0, max(0.0, 0.45*incident + 0.25*network + 0.2*weather + 0.1*market))
-        payload = {"context_risk": round(risk,4), "incident_sev": incident, "network_anom": network,
-                   "weather_sev": weather, "market_vol": market}
-        self.memory.write(f"{self.name}:risk", payload, weight=0.85, entropy=0.2, ttl_secs=900)
-        return {"summary":"Env fused", "influence": 0.2 + 0.6*risk, "reliability": 0.9,
-                "severity": risk, "details": payload, "ok": True}
-
-class ContextConflictAgent(AegisAgent):
-    """
-    Detects conflict between declared intent and fused stress/risk.
-    If intent demands speed under high stress/risk, conflict rises.
-    """
-    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        declared = (input_data.get("intent") or "").lower()
-        # Pull prior fused signals from memory snapshot if present in this dispatch;
-        # otherwise approximate from inline signals.
-        signals = input_data.get("_signals", {}) or {}
-        bio = signals.get("bio", {}) or {}
-        env = signals.get("env", {}) or {}
-        # Local estimates (same math as the fusion agents)
-        hr = float(bio.get("heart_rate", 78.0)); hrv = float(bio.get("hrv", 38.0))
-        gsr = float(bio.get("gsr", 6.0)); vt = float(bio.get("voice_tension", 0.3))
-        hr_s  = min(1.0, max(0.0, (hr - 55.0) / 65.0))
-        hrv_s = 1.0 - min(1.0, max(0.0, (hrv - 20.0) / 80.0))
-        gsr_s = min(1.0, max(0.0, (gsr - 2.0) / 18.0))
-        vt_s  = min(1.0, max(0.0, vt))
-        stress = float(bio.get('stress', None)) if bio.get('stress', None) is not None else min(1.0, max(0.0, 0.35*hr_s + 0.25*hrv_s + 0.2*gsr_s + 0.2*vt_s))
-        incident = float(env.get("incident_sev", 0.0)); network = float(env.get("network_anom", 0.0))
-        weather = float(env.get("weather_sev", 0.0)); market = float(env.get("market_vol", 0.0))
-        risk = float(env.get('context_risk', None)) if env.get('context_risk', None) is not None else min(1.0, max(0.0, 0.45*incident + 0.25*network + 0.2*weather + 0.1*market))
-        want_speed = any(k in declared for k in ("proceed fast","ship now","push hard","ignore risk"))
-        want_pause = any(k in declared for k in ("pause","hold","audit","review"))
-        conflict = 0.0
-        if want_speed:
-            conflict = max(conflict, 0.6*stress + 0.6*risk)
-        if want_pause:
-            conflict = max(conflict, max(0.0, 0.4 - 0.5*(1.0 - max(stress, risk))))
-        payload = {"conflict": round(conflict,4), "stress": round(stress,4), "context_risk": round(risk,4),
-                   "declared_intent": declared}
-        self.memory.write(f"{self.name}:conflict", payload, weight=0.9, entropy=0.15, ttl_secs=1800)
-        return {"summary":"Context-intent conflict", "influence": 0.3 + 0.5*conflict,
-                "reliability": 0.92, "severity": conflict, "details": payload, "ok": True}
+    def __init__(self):
+        """Initialize the council."""
+        self._memory = NexusMemory()
+        self._executor = ThreadPoolExecutor(max_workers=10)
+        self._agents = []
+        self._active = True
+        self._timescales = AegisTimescales()
+        
+    def add_agent(self, agent: BaseAgent) -> None:
+        """Add an agent to the council."""
+        self._agents.append(agent)
+        
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process input through all agents."""
+        if not isinstance(input_data, dict):
+            raise ValueError("Input must be a dictionary")
+            
+        return self._timescales.dispatch(input_data)

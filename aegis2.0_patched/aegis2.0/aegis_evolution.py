@@ -38,7 +38,7 @@ class NexusMemory:
         return xxhash.xxh64(key.encode()).hexdigest()
 
     def write(self, key: str, value: Any, ttl_secs: Optional[int] = None) -> None:
-    now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
         hashed = self._hash(key)
         ttl = ttl_secs if ttl_secs is not None else self.default_ttl_secs
         with self._lock:
@@ -62,7 +62,7 @@ class NexusMemory:
             return self.store.get(hashed, {}).get("value")
 
     def purge_expired(self) -> int:
-    now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
         now_ts = now.timestamp()
         with self._lock:
             while self.expiration_heap and self.expiration_heap[0][0] <= now_ts:

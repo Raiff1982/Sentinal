@@ -1,0 +1,1043 @@
+import json
+import math
+import logging
+import threading
+import unicodedata
+import re
+from datetime import datetime, timedelta, timezone
+from abc import ABC, abstractmethod
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+from typing import Dict, List, Any, Sequence, Optional
+from typing import Deque, Dict, List, Tuple, Any, Optional, TypedDict
+import heapq
+try:
+    import xxhash
+except Exception:
+    xxhash = None
+import os
+
+# Hash helper
+def fast_hash(data: bytes) -> str:
+    if xxhash is not None:
+        return xxhash.xxh64(data).hexdigest()
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+# Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+log = logging.getLogger("AEGIS-Timescales")
+
+# Input Sanitizer
+class InputSanitizer:
+    """Validates and normalizes input strings."""
+    
+    def __init__(self):
+        """Initialize sanitizer."""
+        self.max_length = 10_000  # Max input length (10K chars)
+        self.max_line_length = 1_000  # Max line length
+        self.control_chars = set(range(0x00, 0x20)) - {0x09, 0x0A, 0x0D}  # Control chars except tab, LF, CR
+        
+    def audit_text(self, text: str) -> Dict[str, Any]:
+        """Audit text for safety and normalization."""
+        result = {
+            "safe": True,
+            "issues": [],
+            "warnings": [],
+            "normalized": ""
+        }
+        
+        try:
+            # Check for null/empty
+            if not text:
+                result["normalized"] = ""
+                return result
+                
+            # Length checks
+            if len(text) > self.max_length:
+                result["issues"].append("input_too_long")
+                result["safe"] = False
+                return result
+                
+            # Check line lengths
+            lines = text.splitlines()
+            if any(len(line) > self.max_line_length for line in lines):
+                result["issues"].append("line_too_long")
+                result["warnings"].append(f"Lines should be under {self.max_line_length} characters")
+                
+            # Check for control characters
+            text_bytes = text.encode('utf-8')
+            control_found = False
+            for i, byte in enumerate(text_bytes):
+                if byte in self.control_chars:
+                    control_found = True
+                    result["issues"].append("control_char")
+                    break
+                    
+            # Block if control chars found
+            if control_found:
+                result["safe"] = False
+                return result
+                
+            # Normalize unicode 
+            normalized = unicodedata.normalize("NFKC", text)
+            
+            # Normalize whitespace but preserve newlines
+            normalized = re.sub(r"[ \t]+", " ", normalized)  # Collapse spaces/tabs
+            normalized = re.sub(r"\r\n?|\n", "\n", normalized)  # Normalize line endings
+            normalized = re.sub(r"\n\s+\n", "\n\n", normalized)  # Remove whitespace-only lines
+            normalized = re.sub(r"\n{3,}", "\n\n", normalized)  # Max 2 consecutive newlines
+            normalized = normalized.strip()
+            
+            # Success
+            result["normalized"] = normalized
+            
+        except Exception as e:
+            result["issues"].append(f"sanitization_error:{str(e)}")
+            result["safe"] = False
+            
+        return result
+        
+# Base Agent
+class BaseAgent(ABC):
+    """Base class for all agents."""
+    
+    def __init__(self, name: str, memory: "NexusMemory"):
+        """Initialize agent with name and memory."""
+        self.name = name
+        self.memory = memory
+        self._lock = threading.Lock()
+        
+    @abstractmethod
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process input data and return report."""
+        pass
+        
+# Echo Seed Agent
+class EchoSeedAgent(BaseAgent):
+    """Initial seed agent that processes raw input."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Echo input data with length-based severity."""
+        # Extract text or use empty string
+        text = str(input_data.get("text", ""))
+        
+        # Calculate simple metrics
+        len_severity = min(1.0, len(text) / 1000)
+        
+        details = {
+            "len_s": len_severity,
+            "sev_proxy": 0.2 + (0.8 * len_severity)
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+        
+# Short Term Agent
+class ShortTermAgent(BaseAgent):
+    """Handles immediate context analysis."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        text = str(input_data.get("text", ""))
+        intent = str(input_data.get("intent", ""))
+        
+        # Calculate urgency from intent markers
+        urgency_words = {"now", "asap", "urgent", "immediately", "rush"}
+        found_urgent = any(w in text.lower() or w in intent.lower() 
+                         for w in urgency_words)
+        
+        details = {
+            "urgency_now": 0.8 if found_urgent else 0.0,
+            "severity_now": 0.0  # Will be updated by MetaJudge
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+        
+# Mid Term Agent
+class MidTermAgent(BaseAgent):
+    """Handles medium-term trend analysis."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        # Get recent stress levels
+        stress_hist = []
+        try:
+            mem_entries = self.memory.audit()
+            for entry in mem_entries.values():
+                if "stress" in str(entry.get("value", "")):
+                    stress_hist.append(float(entry.get("stress", 0.0)))
+        except:
+            pass
+            
+        # Calculate trend metrics
+        stress_ema = sum(stress_hist[-5:]) / max(1, len(stress_hist[-5:])) if stress_hist else 0.0
+        sev_ema = 0.0
+        sev_slope = 0.0
+        
+        details = {
+            "stress_ema": stress_ema,
+            "sev_ema": sev_ema,
+            "sev_slope": sev_slope,
+            "forecast_mid": 0.0
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+        
+# Long Term Archivist
+class LongTermArchivistAgent(BaseAgent):
+    """Maintains long-term memory and context."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        # Get memory health metrics
+        mem_audit = self.memory.audit()
+        integrities = [rec.get("integrity", 1.0) for rec in mem_audit.values()]
+        avg_integrity = sum(integrities)/max(1, len(integrities))
+        
+        # Simple drift calculation
+        drift_long = 0.3 + (0.7 * (1.0 - avg_integrity))
+        
+        details = {
+            "avg_memory_integrity": avg_integrity,
+            "drift_long": drift_long,
+            "decision_bias": 1.0,
+            "comp_ema": drift_long
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+        
+# Biofeedback Agent
+class BiofeedbackAgent(BaseAgent):
+    """Processes biometric signals."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        bio = input_data.get("_signals", {}).get("bio", {})
+        
+        # Process biometric signals
+        hr = float(bio.get("heart_rate", 60))
+        hr_s = min(1.0, max(0.0, (hr - 60) / 60))
+        
+        hrv = float(bio.get("hrv", 50))
+        hrv_s = min(1.0, max(0.0, 1.0 - (hrv / 50)))
+        
+        gsr = float(bio.get("gsr", 5))
+        gsr_s = min(1.0, max(0.0, gsr / 15))
+        
+        voice = float(bio.get("voice_tension", 0.0))
+        
+        # Combined stress metric
+        stress = max(
+            hr_s,
+            hrv_s,
+            gsr_s,
+            voice,
+            float(bio.get("stress", 0.0))
+        )
+        
+        details = {
+            "hr_s": hr_s,
+            "hrv_s": hrv_s,
+            "gsr_s": gsr_s,
+            "voice_s": voice,
+            "operator_stress": stress
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+        
+# Environment Signal Agent
+class EnvSignalAgent(BaseAgent):
+    """Processes environmental context signals."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        env = input_data.get("_signals", {}).get("env", {})
+        
+        details = {
+            "context_risk": float(env.get("context_risk", 0.0)),
+            "incident_sev": float(env.get("incident_sev", 0.0)),
+            "market_vol": float(env.get("market_volatility", 0.0)),
+            "network_anom": float(env.get("network_anomalies", 0.0))
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+        
+# Context Conflict Agent
+class ContextConflictAgent(BaseAgent):
+    """Detects conflicts between intent and context."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        text = str(input_data.get("text", ""))
+        intent = str(input_data.get("intent", ""))
+        
+        # Check for conflicting signals
+        rush_words = {"fast", "quick", "hurry", "rush"}
+        caution_words = {"careful", "safe", "slow", "check"}
+        
+        rush = any(w in text.lower() or w in intent.lower() for w in rush_words)
+        caution = any(w in text.lower() or w in intent.lower() for w in caution_words)
+        
+        conflict = 0.8 if (rush and caution) else 0.0
+        
+        details = {
+            "intent_conflict": conflict,
+            "confidence": 0.8
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+        
+# Timescale Coordinator
+class TimeScaleCoordinator(BaseAgent):
+    """Coordinates short/mid/long term signals."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        # Get recent decisions for continuity
+        last_decision = str(input_data.get("_last_decision", "PROCEED"))
+        
+        # Progressive caution on repeated high-stress scenarios
+        caution_signal = 0.0
+        if last_decision == "PROCEED_WITH_CAUTION":
+            caution_signal = 0.4
+        elif last_decision == "BLOCK":
+            caution_signal = 0.8
+            
+        edges = []
+        for agent in ["ShortTerm", "MidTerm", "LongArchivist"]:
+            edges.append({
+                "from": agent,
+                "to": "MetaJudge",
+                "weight": 0.33
+            })
+            
+        details = {
+            "caution_fused": caution_signal,
+            "edges": edges
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+        
+# Meta Judge Agent
+class MetaJudgeAgent(BaseAgent):
+    """Final decision coordination."""
+    
+    def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        # Collect other agents' signals
+        all_edges = []
+        for agent in ["EchoSeed", "ShortTerm", "MidTerm", "LongArchivist",
+                     "BiofeedbackAgent", "EnvSignalAgent", "ContextConflictAgent"]:
+            all_edges.append({
+                "from": agent,
+                "to": self.name,
+                "weight": 0.3
+            })
+            
+        details = {
+            "decision": "PROCEED",  # Will be updated by council
+            "edges": all_edges
+        }
+        
+        return {
+            "agent": self.name,
+            "details": details,
+            "ok": True
+        }
+        
+# Memory Types
+class MemoryEntry(TypedDict, total=False):
+    value: Any
+    timestamp: datetime
+    weight: float
+    entropy: float
+    ttl: int
+
+class MemorySnapshot(TypedDict, total=False):
+    version: str
+    store: Dict[str, MemoryEntry]
+    expiration_heap: List[Tuple[float, str]]
+    max_entries: int
+    default_ttl_secs: int
+
+class NexusMemory:
+    """Memory system with integrity tracking and persistence."""
+    VERSION = "1.0.0"  # For backwards compatibility
+    
+    def __init__(
+        self,
+        max_entries: int = 20_000,
+        default_ttl_secs: int = 14*24*3600,
+        persistence_path: Optional[str] = None,
+        initial_entries: Optional[Dict[str, Dict[str, Any]]] = None
+    ):
+        """Initialize NexusMemory with optional persistence.
+        
+        Args:
+            max_entries: Maximum number of entries to store
+            default_ttl_secs: Default time-to-live in seconds
+            persistence_path: Optional path for persisting memory state
+            initial_entries: Optional initial memory entries
+        """
+        self.store: Dict[str, Dict[str, Any]] = {}
+        self.expiration_heap: List[Tuple[float, str]] = []
+        self.max_entries = max_entries
+        self.default_ttl_secs = default_ttl_secs
+        self._lock = threading.Lock()
+        self._persistence_path = persistence_path
+        
+        try:
+            # Load from persistence first if available
+            if persistence_path and os.path.exists(persistence_path):
+                self._load_from_disk()
+                
+            # Apply initial entries after persistence (override)
+            if initial_entries:
+                # Convert any string timestamps back to datetime
+                for key, entry in initial_entries.items():
+                    if isinstance(entry.get("timestamp"), str):
+                        try:
+                            entry["timestamp"] = datetime.fromisoformat(entry["timestamp"])
+                        except (ValueError, TypeError):
+                            entry["timestamp"] = datetime.now(timezone.utc)
+                    self.store[key] = entry
+                    if "ttl" in entry:
+                        expiration = entry["timestamp"] + timedelta(seconds=entry["ttl"])
+                        heapq.heappush(self.expiration_heap, 
+                                     (expiration.timestamp(), key))
+        except Exception as e:
+            log.error(f"Failed to initialize memory: {e}")
+            # Reset to empty state on error
+            self.store = {}
+            self.expiration_heap = []
+            
+    def write(self, key: str, value: Any, weight: float = 1.0, entropy: float = 0.1, ttl_secs: Optional[int] = None) -> str:
+        """Write a value to memory with given weight and entropy."""
+        now = datetime.now(timezone.utc)
+        ttl = ttl_secs if ttl_secs is not None else self.default_ttl_secs
+        
+        with self._lock:
+            # Check if we need to purge entries
+            if len(self.store) >= self.max_entries:
+                self._purge_lowest_integrity(now)
+                
+            # Store the entry with metadata
+            entry = {
+                "value": value,
+                "timestamp": now,
+                "weight": max(0.0, min(1.0, float(weight))),
+                "entropy": max(0.0, min(1.0, float(entropy))),
+                "ttl": max(1, int(ttl)),
+                "key": key  # Store original key for audit
+            }
+            self.store[key] = entry
+            
+            # Update expiration heap
+            expiration_time = (now + timedelta(seconds=ttl)).timestamp()
+            heapq.heappush(self.expiration_heap, (expiration_time, key))
+            
+            # Auto-save if persistence enabled
+            if self._persistence_path:
+                try:
+                    self._save_to_disk()
+                except Exception as e:
+                    log.error(f"Failed to save memory to disk: {e}")
+            
+        return key
+
+    def _purge_lowest_integrity(self, now: datetime) -> None:
+        """Purge entries with lowest integrity to maintain max_entries limit."""
+        if not self.store:
+            return
+            
+        # Calculate and sort integrities
+        integrities = []
+        for key, entry in self.store.items():
+            integrity = self._integrity(entry, now)
+            integrities.append((integrity, key))
+        integrities.sort()  # Lowest integrity first
+        
+        # Remove entries until under max_entries
+        to_remove = max(0, len(self.store) - self.max_entries + 1)
+        for _, key in integrities[:to_remove]:
+            if key in self.store:
+                del self.store[key]
+        
+        # Clean up expiration heap
+        self.expiration_heap = [(t, k) for t, k in self.expiration_heap 
+                              if k in self.store]
+        heapq.heapify(self.expiration_heap)
+        
+        # Force save after purge
+        if self._persistence_path:
+            try:
+                self._save_to_disk()
+            except Exception as e:
+                log.error(f"Failed to save memory after purge: {e}")
+
+    def read(self, key: str) -> Optional[Any]:
+        """Read a value from memory."""
+        with self._lock:
+            entry = self.store.get(key)
+            if not entry:
+                return None
+                
+            # Check if expired
+            now = datetime.now(timezone.utc)
+            age = (now - entry["timestamp"]).total_seconds()
+            if age > entry["ttl"]:
+                del self.store[key]
+                return None
+                
+            return entry["value"]
+            
+    def _save_to_disk(self) -> None:
+        """Save memory state to disk."""
+        if not self._persistence_path:
+            return
+            
+        try:
+            # Create sanitized snapshot
+            sanitized_store = {}
+            for key, entry in self.store.items():
+                # Deep copy and convert datetime
+                sanitized_entry = entry.copy()
+                if isinstance(entry.get("timestamp"), datetime):
+                    sanitized_entry["timestamp"] = entry["timestamp"].isoformat()
+                sanitized_store[key] = sanitized_entry
+            
+            snapshot = {
+                "version": self.VERSION,
+                "store": sanitized_store,
+                "expiration_heap": [(float(t), k) for t, k in self.expiration_heap],
+                "max_entries": self.max_entries,
+                "default_ttl_secs": self.default_ttl_secs
+            }
+            
+            # Write atomically using temporary file
+            temp_path = f"{self._persistence_path}.tmp"
+            with open(temp_path, "w") as f:
+                json.dump(snapshot, f, indent=2)
+            os.replace(temp_path, self._persistence_path)
+            
+        except Exception as e:
+            log.error(f"Failed to save memory snapshot: {e}")
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+            raise
+
+    def _load_from_disk(self) -> None:
+        """Load memory state from disk."""
+        if not self._persistence_path or not os.path.exists(self._persistence_path):
+            return
+            
+        try:
+            with open(self._persistence_path, 'r') as f:
+                data = f.read()
+                if not data.strip():
+                    return  # Empty file
+                snapshot = json.loads(data)
+                
+            # Version check
+            if snapshot.get("version") != self.VERSION:
+                log.warning(f"Memory version mismatch: {snapshot.get('version')} != {self.VERSION}")
+                return
+                
+            # Load and sanitize entries
+            store = {}
+            now = datetime.now(timezone.utc)
+            expiration_heap = []
+            
+            try:
+                entries = snapshot.get("store", {})
+                if not isinstance(entries, dict):
+                    raise ValueError("Invalid store format")
+                    
+                for key, entry in entries.items():
+                    try:
+                        # Convert timestamp
+                        if isinstance(entry.get("timestamp"), str):
+                            entry["timestamp"] = datetime.fromisoformat(entry["timestamp"])
+                        elif not isinstance(entry.get("timestamp"), datetime):
+                            entry["timestamp"] = now  # Default to current time
+                            
+                        # Ensure required fields
+                        entry["weight"] = max(0.0, min(1.0, float(entry.get("weight", 1.0))))
+                        entry["entropy"] = max(0.0, min(1.0, float(entry.get("entropy", 0.1))))
+                        entry["ttl"] = max(1, int(entry.get("ttl", self.default_ttl_secs)))
+                        
+                        # Validate expiration
+                        expiration = entry["timestamp"] + timedelta(seconds=entry["ttl"])
+                        if expiration > now:  # Only keep non-expired entries
+                            store[key] = entry
+                            expiration_heap.append((expiration.timestamp(), key))
+                            
+                    except Exception as e:
+                        log.warning(f"Skipping invalid entry {key}: {e}")
+                        continue
+                        
+            except Exception as e:
+                log.error(f"Failed to process entries: {e}")
+                return
+                
+            # Only update state if we have valid entries
+            if store:
+                heapq.heapify(expiration_heap)
+                self.store = store
+                self.expiration_heap = expiration_heap
+                self.max_entries = int(snapshot.get("max_entries", self.max_entries))
+                self.default_ttl_secs = int(snapshot.get("default_ttl_secs", self.default_ttl_secs))
+                
+        except json.JSONDecodeError:
+            log.warning("Corrupted memory file, starting fresh")
+            # Don't raise - allow graceful recovery with empty state
+            
+        except Exception as e:
+            log.error(f"Failed to load memory from disk: {e}")
+            raise  # Re-raise unexpected errors
+
+    def _integrity(self, rec: Dict[str, Any], now: Optional[datetime] = None) -> float:
+        """Calculate integrity score for a memory entry."""
+        if not rec:
+            return 0.0
+            
+        now = now or datetime.now(timezone.utc)
+        age_sec = (now - rec["timestamp"]).total_seconds()
+        ttl = max(1, rec.get("ttl", self.default_ttl_secs))
+        
+        # Integrity decays with age and is affected by weight and entropy
+        age_factor = max(0.0, 1.0 - (age_sec / ttl))
+        weight = rec.get("weight", 1.0)
+        entropy = rec.get("entropy", 0.1)
+        
+        # Compute integrity score
+        base_integrity = age_factor * weight
+        entropy_penalty = entropy * 0.3  # Entropy reduces integrity
+        
+        return max(0.0, min(1.0, base_integrity - entropy_penalty))
+        
+    def purge_expired(self) -> None:
+        """Remove expired entries from memory."""
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            # Update expiration heap
+            while self.expiration_heap:
+                expiration, key = self.expiration_heap[0]
+                if expiration > now.timestamp():
+                    break
+                heapq.heappop(self.expiration_heap)
+                if key in self.store:
+                    del self.store[key]
+
+    def audit(self) -> Dict[str, Dict[str, Any]]:
+        """Get diagnostic snapshot of memory state."""
+        now = datetime.now(timezone.utc)
+        audit_data = {}
+        
+        with self._lock:
+            for key, entry in self.store.items():
+                audit_entry = entry.copy()
+                audit_entry["integrity"] = self._integrity(entry, now)
+                audit_data[key] = audit_entry
+                
+        return audit_data
+
+class AegisCouncil:
+    """Orchestrates and coordinates multiple agents for timescale assessment."""
+
+    def __init__(self, per_agent_timeout_sec: float = 2.5, policies: Optional[Dict[str, Any]] = None):
+        """Initialize council with agent timeout and policies.
+        
+        Args:
+            per_agent_timeout_sec: Timeout per agent in seconds
+            policies: Optional policy configuration
+        """
+        self.sanitizer = InputSanitizer()
+        self.memory = None  # Set by register_agent
+        
+        # Initialize default policies
+        self.policies = {
+            "risk_cap": 0.6,
+            "stress_cap": 0.7,
+            "min_integrity": 0.7,
+            "timescale_cap": 0.55
+        }
+        # Apply custom policies
+        if policies:
+            self.policies.update(policies)
+            
+        self.agents = {}
+        self._timeout_sec = per_agent_timeout_sec
+        self._lock = threading.Lock()
+        
+        # Metric state
+        self._severity = 0.0
+        self._stress = 0.0
+        self._risk = 0.0
+        self._conflict = 0.0
+        self._timescale = 0.0
+        
+    def _initialize_state(self) -> None:
+        """Reset metric state before processing."""
+        self._severity = 0.0
+        self._stress = 0.0
+        self._risk = 0.0
+        self._conflict = 0.0
+        self._timescale = 0.0
+        
+    def _process_metrics(self, details: Dict[str, Any], input_data: Dict[str, Any]) -> None:
+        """Process metrics from an agent's report."""
+        # Severity
+        for k, v in details.items():
+            if k != "edges" and isinstance(v, (int, float)):
+                if k in ("severity", "severity_now"):
+                    self._severity = max(self._severity, float(v))
+        
+        # Stress signals
+        agent_stress = float(details.get("stress", details.get("operator_stress", 0.0)) or 0.0)
+        signal_stress = float(input_data.get("_signals", {}).get("bio", {}).get("stress", 0.0))
+        env_stress = float(input_data.get("_signals", {}).get("env", {}).get("stress", 0.0))
+        input_stress = float(input_data.get("stress", input_data.get("operator_stress", 0.0)) or 0.0)
+        
+        # Update max stress
+        self._stress = max(
+            self._stress,
+            agent_stress,
+            signal_stress,
+            env_stress,
+            input_stress
+        )
+        
+        # Risk signals
+        agent_risk = float(details.get("context_risk", details.get("risk", 0.0)) or 0.0)
+        signal_risk = float(input_data.get("_signals", {}).get("env", {}).get("context_risk", 0.0))
+        
+        # Update max risk
+        self._risk = max(
+            self._risk,
+            agent_risk,
+            signal_risk,
+            float(input_data.get("risk", 0.0) or 0.0)
+        )
+        
+        # Conflict and timescale
+        curr_conflict = float(details.get("conflict", input_data.get("conflict", 0.0)) or 0.0)
+        self._conflict = max(self._conflict, curr_conflict)
+        
+        curr_timescale = float(details.get("timescale_signal", details.get("caution_fused", 0.0)) or 0.0)
+        self._timescale = max(self._timescale, curr_timescale)
+        
+    def _make_decision(self) -> str:
+        """Make final decision based on current metrics."""
+        # Get memory health
+        mem_audit = self.memory.audit()
+        integrities = [rec.get("integrity", 1.0) for rec in mem_audit.values()] or [1.0]
+        avg_integrity = sum(integrities)/len(integrities)
+        
+        # Get thresholds from policies
+        stress_cap = self.policies.get("stress_cap", 0.7)
+        risk_cap = self.policies.get("risk_cap", 0.6)
+        min_integrity = self.policies.get("min_integrity", 0.7)
+        timescale_cap = self.policies.get("timescale_cap", 0.55)
+        
+        # Calculate stress severity
+        stress_severity = 0.0
+        if self._stress > 0.9:  # Extreme stress
+            stress_severity = 1.0
+        elif self._stress > stress_cap:  # Above cap
+            stress_severity = (self._stress - stress_cap) / (0.9 - stress_cap)
+            
+        # Check for blocking conditions
+        block = any([
+            self._risk > 0.9,  # Critical risk
+            self._conflict > 0.8 and self._stress > 0.75,  # High conflict + stress
+            self._timescale > 0.85,  # Critical timescale
+            self._stress > 0.9,  # Critical stress
+            avg_integrity < max(0.1, min_integrity * 0.5),  # Severe integrity loss
+            stress_severity > 0.9  # Critical stress severity
+        ])
+        
+        # Check for caution conditions
+        cautious = any([
+            self._severity > risk_cap,  # High severity
+            avg_integrity < min_integrity,  # Low integrity 
+            self._stress > stress_cap,  # High stress
+            self._conflict > 0.5,  # Moderate conflict
+            self._timescale > timescale_cap,  # Timescale concern
+            self._risk > risk_cap,  # High risk
+            stress_severity > 0.5  # Significant stress impact
+        ])
+        
+        return "BLOCK" if block else "PROCEED_WITH_CAUTION" if cautious else "PROCEED"
+
+    def register_agent(self, agent: Any) -> None:
+        """Register an agent with the council."""
+        self.agents[agent.name] = agent
+        # First registered agent's memory becomes council memory
+        if self.memory is None:
+            self.memory = agent.memory
+
+    def _sanitize_input(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Sanitize and validate input data."""
+        sanitized = {}
+        audit = {"issues": [], "warnings": [], "safe": True}
+
+        try:
+            for key, value in input_data.items():
+                if isinstance(value, str):
+                    result = self.sanitizer.audit_text(value)
+                    if not result["safe"]:
+                        audit["issues"].extend(result["issues"])
+                    audit["warnings"].extend(result.get("warnings", []))
+                    sanitized[key] = result["normalized"]
+                else:
+                    sanitized[key] = value
+        except Exception as e:
+            audit["issues"].append(f"sanitization_error:{str(e)}")
+            audit["safe"] = False
+
+        audit["issues"] = sorted(set(audit["issues"]))
+        audit["warnings"] = sorted(set(audit["warnings"]))
+        sanitized["_audit"] = audit
+        return sanitized
+
+    def dispatch(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch input to agents for parallel processing.
+        
+        Args:
+            input_data: Input data to process
+            
+        Returns:
+            Processed results including reports and metrics
+        """
+        def process_agent(agent: Any, name: str, data: Dict[str, Any]) -> Dict[str, Any]:
+            """Execute agent processing with error handling."""
+            try:
+                result = agent.process(data)
+                result["agent"] = name  # Tag with agent name
+                return result
+            except Exception as e:
+                log.error(f"Agent {name} failed: {e}")
+                return {
+                    "agent": name,
+                    "ok": False,
+                    "error": str(e)
+                }
+        
+        def process_result(result: Dict[str, Any], reports: List[Dict], edges: List[Dict]) -> None:
+            """Process a single agent's result."""
+            if not isinstance(result, dict):
+                raise ValueError("Invalid agent result")
+                
+            reports.append(result)
+            details = result.get("details", {})
+            
+            # Process metrics and collect edges
+            self._process_metrics(details, input_data)
+            if "edges" in details:
+                edges.extend(details["edges"])
+                
+        # Validate input
+        if not isinstance(input_data, dict):
+            return {
+                "reports": [],
+                "input_audit": {"issues": ["invalid_input"]},
+                "decision": "BLOCK"
+            }
+        
+        # Initialize state
+        self._initialize_state()
+        reports: List[Dict] = []
+        edges: List[Dict] = []
+        
+        try:
+            # Sanitize input
+            sanitized = self._sanitize_input(input_data) 
+            audit = sanitized.pop("_audit", {})
+            
+            if not audit.get("safe", False):
+                return {
+                    "reports": [],
+                    "input_audit": audit,
+                    "decision": "BLOCK"
+                }
+                
+            # Process agents in parallel
+            with ThreadPoolExecutor(max_workers=len(self.agents)) as executor:
+                futures = {
+                    executor.submit(process_agent, agent, name, sanitized): name
+                    for name, agent in self.agents.items()
+                }
+                
+                # Handle results as they complete
+                for future in as_completed(futures):
+                    try:
+                        result = future.result(timeout=self._timeout_sec)
+                        process_result(result, reports, edges)
+                    except Exception as e:
+                        name = futures[future]
+                        reports.append({
+                            "agent": name,
+                            "ok": False,
+                            "error": str(e)
+                        })
+                        
+            # Make final decision
+            decision = self._make_decision()
+            
+            # Build response
+            response = {
+                "reports": reports,
+                "input_audit": audit,
+                "memory_snapshot": {}, 
+                "explainability_graph": {
+                    "edges": edges,
+                    "nodes": sorted({e["from"] for e in edges} | {e["to"] for e in edges})
+                }
+            }
+            
+            # Update MetaJudge if present
+            for report in reports:
+                if report.get("agent") == "MetaJudge":
+                    report["details"]["decision"] = decision
+                    break
+                
+            return response
+            
+        except Exception as e:
+            log.error(f"Council dispatch failed: {e}")
+            return {
+                "reports": [],
+                "input_audit": {"issues": [str(e)]},
+                "decision": "BLOCK"
+            }
+            
+    def _process_metrics(self, details: Dict[str, Any], input_data: Dict[str, Any], 
+                      severity: float, stress: float, risk: float, 
+                      conflict: float, timescale: float, edges: list) -> None:
+        """Process metric details from an agent report."""
+        # Process stress signals 
+        agent_stress = float(details.get("stress", details.get("operator_stress", 0.0)) or 0.0)
+        signal_stress = float(input_data.get("_signals", {}).get("bio", {}).get("stress", 0.0))
+        env_stress = float(input_data.get("_signals", {}).get("env", {}).get("stress", 0.0))
+        input_stress = float(input_data.get("stress", input_data.get("operator_stress", 0.0)) or 0.0)
+        
+        # Get max across all stress sources
+        current_stress = max(
+            stress,
+            agent_stress,
+            signal_stress,
+            env_stress,
+            input_stress
+        )
+        self._stress = current_stress  # Store on instance
+        
+        # Process risk signals
+        agent_risk = float(details.get("context_risk", details.get("risk", 0.0)) or 0.0)
+        signal_risk = float(input_data.get("_signals", {}).get("env", {}).get("context_risk", 0.0))
+        self._risk = max(
+            self._risk,
+            agent_risk,
+            signal_risk, 
+            float(input_data.get("risk", 0.0) or 0.0)
+        )
+        
+        # Process conflict and timescale signals
+        curr_conflict = float(details.get("conflict", input_data.get("conflict", 0.0)) or 0.0)
+        self._conflict = max(self._conflict, curr_conflict)
+            
+            curr_timescale = float(details.get("timescale_signal", details.get("caution_fused", 0.0)) or 0.0)
+            self._timescale = max(timescale, curr_timescale)  # Store on instance                except Exception as e:
+                    log.error(f"Agent {name} failed: {e}")
+                    reports.append({
+                        "agent": name,
+                        "ok": False,
+                        "error": str(e)
+                    })
+                    
+        # Get memory health snapshot
+        mem_audit = self.memory.audit()
+        integrities = [rec.get("integrity", 1.0) for rec in mem_audit.values()] or [1.0]
+        avg_integrity = sum(integrities)/len(integrities)
+
+        # Get policy thresholds
+        stress_cap = self.policies.get("stress_cap", 0.7)  # Default stress threshold
+        risk_cap = self.policies.get("risk_cap", 0.6)  # Default risk threshold  
+        min_integrity = self.policies.get("min_integrity", 0.7)  # Default integrity minimum
+        timescale_cap = self.policies.get("timescale_cap", 0.55)  # Default timescale threshold
+        
+        # Calculate stress severity
+        stress_severity = 0.0
+        if stress > 0.9:  # Extreme stress
+            stress_severity = 1.0
+        elif stress > stress_cap:  # Above cap
+            stress_severity = (stress - stress_cap) / (0.9 - stress_cap)
+        
+        # Decision checks
+        cautious = any([
+            severity > risk_cap,  # High risk
+            avg_integrity < min_integrity,  # Low integrity
+            stress > stress_cap,  # High stress
+            conflict > 0.5,  # Moderate conflict
+            timescale > timescale_cap,  # Timescale concern
+            current_risk > risk_cap,  # Direct risk check
+            stress_severity > 0.5  # Significant stress impact
+        ])
+        
+        block = any([
+            risk > 0.9,  # Critical risk
+            conflict > 0.8 and stress > 0.75,  # High conflict + stress
+            timescale > 0.85,  # Critical timescale
+            stress > 0.9,  # Critical stress
+            avg_integrity < max(0.1, min_integrity * 0.5),  # Severe integrity loss
+            current_risk > 0.9,  # Critical direct risk
+            stress_severity > 0.9  # Critical stress severity
+        ])
+
+        # Determine final decision
+        decision = "BLOCK" if block else "PROCEED_WITH_CAUTION" if cautious else "PROCEED"
+        
+        # Build response bundle
+        bundle = {
+            "reports": reports,
+            "input_audit": input_audit,
+            "memory_snapshot": {},  # Redacted for response size
+            "explainability_graph": {
+                "edges": edges,
+                "nodes": sorted({e["from"] for e in edges} | {e["to"] for e in edges})
+            }
+        }
+        
+        for report in reports:
+            if report.get("agent") == "MetaJudge":
+                report["details"]["decision"] = decision
+                break
+                
+        return bundle

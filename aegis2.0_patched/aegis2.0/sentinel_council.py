@@ -20,13 +20,19 @@ DEFAULT_CONFIG = {
     "memory": {
         "max_entries": 20000,  # Match NexusMemory default
         "default_ttl_secs": 14*24*3600  # 14 days (match NexusMemory default)
-    }
+    },
+    # Default policy thresholds
+    "risk_cap": 0.6,
+    "stress_cap": 0.7,
+    "timescale_cap": 0.55,
+    "min_integrity": 0.7
 }
 
 def get_council(
     per_agent_timeout_sec: float = 2.5,
     memory_config: Optional[Dict[str, Any]] = None,
-    persistence_path: Optional[str] = None
+    persistence_path: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None
 ) -> AegisCouncil:
     """Initialize and configure the Aegis Council with persistence support.
     
@@ -36,10 +42,16 @@ def get_council(
         persistence_path: Path to memory persistence file
     """
     try:
+        # Apply configuration overrides
+        final_config = DEFAULT_CONFIG.copy()
+        if config:
+            final_config.update(config)
+            
         # Initialize memory configuration
-        memory_cfg = DEFAULT_CONFIG["memory"].copy()
+        memory_cfg = final_config["memory"].copy()
         if memory_config:
             memory_cfg.update(memory_config)
+            final_config["memory"] = memory_cfg
             
         # Initialize memory with persistence if path provided
         if persistence_path:
@@ -56,9 +68,14 @@ def get_council(
         else:
             memory = NexusMemory(**memory_cfg)
             
-        # Initialize council
+        # Extract policy configuration
+        policy_config = {k: v for k, v in final_config.items() 
+                       if k in ["risk_cap", "stress_cap", "min_integrity", "timescale_cap"]}
+                       
+        # Initialize council with policies
         council = AegisCouncil(
-            per_agent_timeout_sec=per_agent_timeout_sec
+            per_agent_timeout_sec=per_agent_timeout_sec,
+            policies=policy_config
         )
         
         # Register core agents
