@@ -49,25 +49,58 @@ class InputSanitizer:
 
     @staticmethod
     def audit_text(text: str) -> Dict[str, Any]:
+        """Audit input text for security and safety issues.
+        
+        Args:
+            text: Input text to audit
+            
+        Returns:
+            Dict containing:
+            - normalized: Normalized text
+            - issues: List of found issues 
+            - safe: Whether text is safe to process
+            - warnings: Non-blocking informational warnings
+        """
         if not isinstance(text, str):
-            return {"normalized": "", "issues": ["invalid_type"], "safe": False}
+            return {
+                "normalized": "", 
+                "issues": ["invalid_type"], 
+                "safe": False,
+                "warnings": []
+            }
+            
         issues = []
+        warnings = []
+        
+        # Check for critical issues
         if len(text) > InputSanitizer.MAX_INPUT_LENGTH:
             issues.append("input_too_long")
+            
         for ch in InputSanitizer.CONTROL_CHARS:
             if ch in text:
                 issues.append("control_char")
                 break
+                
         for tok in InputSanitizer.DANGEROUS_TOKENS:
             if re.search(tok, text, re.IGNORECASE):
                 issues.append(f"danger_token:{tok}")
+                
+        # Check for informational warnings
         if "\n" in text or "\r" in text:
-            issues.append("newline_present")
-        normalized = InputSanitizer.normalize(text)
+            warnings.append("newline_present")
+            
+        # Normalize text
+        try:
+            normalized = InputSanitizer.normalize(text)
+        except ValueError as e:
+            issues.append(f"normalization_failed:{str(e)}")
+            normalized = ""
+            
         return {
             "normalized": normalized,
             "issues": sorted(set(issues)),
-            "safe": len(issues) == 0
+            "warnings": sorted(set(warnings)),
+            "safe": len(issues) == 0  # Only critical issues affect safety
         }
 
 # Nexus Memory
@@ -590,9 +623,23 @@ class BiofeedbackAgent(AegisAgent):
         gsr_s = min(1.0, max(0.0, (gsr - 2.0) / 18.0))
         vt_s  = min(1.0, max(0.0, vt))
         stress = float(bio.get('stress', None)) if bio.get('stress', None) is not None else min(1.0, max(0.0, 0.35*hr_s + 0.25*hrv_s + 0.2*gsr_s + 0.2*vt_s))
+        
+        # Get environmental signals
+        env = (input_data.get("_signals", {}) or {}).get("env", {}) or {}
+        # Pull latest risk from Nexus if not provided
+        if not env and hasattr(self.memory, 'nexus'):
+            v = self.memory.nexus.value('env','context_risk')
+            if v is not None:
+                env = {'context_risk': v}
+                
         incident = float(env.get("incident_sev", 0.0)); network = float(env.get("network_anom", 0.0))
         weather = float(env.get("weather_sev", 0.0)); market = float(env.get("market_vol", 0.0))
         risk = float(env.get('context_risk', None)) if env.get('context_risk', None) is not None else min(1.0, max(0.0, 0.45*incident + 0.25*network + 0.2*weather + 0.1*market))
+        
+        # Extract declared intents from normalized text
+        text = input_data.get("text", "").lower()
+        declared = [text[m.start():m.end()] for m in re.finditer(r'\b(?:proceed fast|ship now|push hard|ignore risk|pause|hold|audit|review)\b', text)]
+        
         want_speed = any(k in declared for k in ("proceed fast","ship now","push hard","ignore risk"))
         want_pause = any(k in declared for k in ("pause","hold","audit","review"))
         conflict = 0.0
@@ -602,8 +649,9 @@ class BiofeedbackAgent(AegisAgent):
             conflict = max(conflict, max(0.0, 0.4 - 0.5*(1.0 - max(stress, risk))))
         payload = {"conflict": round(conflict,4), "stress": round(stress,4), "context_risk": round(risk,4),
                    "declared_intent": declared}
+                   
         self.memory.write(f"{self.name}:conflict", payload, weight=0.9, entropy=0.15, ttl_secs=1800)
-            if hasattr(self.memory, 'nexus'):
-                self.memory.nexus.ingest('context','conflict', conflict, source=f'agent:{self.name}', ttl_sec=1800.0)
+        if hasattr(self.memory, 'nexus'):
+            self.memory.nexus.ingest('context','conflict', conflict, source=f'agent:{self.name}', ttl_sec=1800.0)
         return {"summary":"Context-intent conflict", "influence": 0.3 + 0.5*conflict,
                 "reliability": 0.92, "severity": conflict, "details": payload, "ok": True}

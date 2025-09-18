@@ -198,10 +198,31 @@ class MetaJudgeEvolvable:
     def decide(self, reports: List[AgentReport], avg_memory_integrity: float) -> AgentReport:
         try:
             g = self.genes
-            valid_reports = [r for r in reports if r.get("ok") and all(k in r for k in ("severity", "reliability"))]
-            severity = sum(r["severity"] * r["reliability"] for r in valid_reports) / max(1.0, sum(r["reliability"] for r in valid_reports))
+            valid_reports = [r for r in reports if r.get("ok") and all(k in r for k in ("severity", "reliability", "influence"))]
+            
+            # Calculate severity using weighted average of (influence × reliability)
+            severity_weights = []
+            total_weight = 0.0
+            severity = 0.0
+            
+            for r in valid_reports:
+                influence = float(r.get("influence", 0.0))
+                reliability = float(r.get("reliability", 0.0))
+                r_severity = float(r.get("severity", 0.0))
+                weight = influence * reliability
+                
+                severity_weights.append((r_severity, weight))
+                total_weight += weight
+            
+            if severity_weights:
+                # Normalize weights and calculate weighted average
+                severity = sum(s * (w / total_weight) for s, w in severity_weights)
+                # Clamp to [0,1]
+                severity = max(0.0, min(1.0, severity))
+            
+            # Initialize other metrics
             stress = 0.0
-            risk = 0.0
+            risk = 0.0 
             conflict = 0.0
             timescale = 0.0
             for r in valid_reports:

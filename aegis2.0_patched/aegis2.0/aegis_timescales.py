@@ -49,25 +49,58 @@ class InputSanitizer:
 
     @staticmethod
     def audit_text(text: str) -> Dict[str, Any]:
+        """Audit input text for security and safety issues.
+        
+        Args:
+            text: Input text to audit
+            
+        Returns:
+            Dict containing:
+            - normalized: Normalized text
+            - issues: List of found issues 
+            - safe: Whether text is safe to process
+            - warnings: Non-blocking informational warnings
+        """
         if not isinstance(text, str):
-            return {"normalized": "", "issues": ["invalid_type"], "safe": False}
+            return {
+                "normalized": "", 
+                "issues": ["invalid_type"], 
+                "safe": False,
+                "warnings": []
+            }
+            
         issues = []
+        warnings = []
+        
+        # Check for critical issues
         if len(text) > InputSanitizer.MAX_INPUT_LENGTH:
             issues.append("input_too_long")
+            
         for ch in InputSanitizer.CONTROL_CHARS:
             if ch in text:
                 issues.append("control_char")
                 break
+                
         for tok in InputSanitizer.DANGEROUS_TOKENS:
             if re.search(tok, text, re.IGNORECASE):
                 issues.append(f"danger_token:{tok}")
+                
+        # Check for informational warnings
         if "\n" in text or "\r" in text:
-            issues.append("newline_present")
-        normalized = InputSanitizer.normalize(text)
+            warnings.append("newline_present")
+            
+        # Normalize text
+        try:
+            normalized = InputSanitizer.normalize(text)
+        except ValueError as e:
+            issues.append(f"normalization_failed:{str(e)}")
+            normalized = ""
+            
         return {
             "normalized": normalized,
             "issues": sorted(set(issues)),
-            "safe": len(issues) == 0
+            "warnings": sorted(set(warnings)),
+            "safe": len(issues) == 0  # Only critical issues affect safety
         }
 
 # Nexus Memory Types
@@ -548,10 +581,31 @@ class MetaJudgeAgent(AegisAgent):
     def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         reports = input_data.get("_agent_reports", []) or []
         valid = [r for r in reports if r.get("ok")]
-        # Weighted influence index
-        weights = [(r.get("agent",""), float(r.get("influence",0.0))*float(r.get("reliability",0.0))) for r in valid]
+        
+        # Calculate weighted severity using influence × reliability
+        severity_weights = []
+        total_weight = 0.0
+        severity = 0.0
+        
+        for r in valid:
+            influence = float(r.get("influence", 0.0))
+            reliability = float(r.get("reliability", 0.0))
+            r_severity = float(r.get("severity", 0.0))
+            weight = influence * reliability
+            
+            severity_weights.append((r_severity, weight))
+            total_weight += weight
+        
+        if severity_weights:
+            # Normalize weights and calculate weighted average
+            severity = sum(s * (w / total_weight) for s, w in severity_weights)
+            # Clamp to [0,1]
+            severity = max(0.0, min(1.0, severity))
+        
+        # Weighted influence index for visualization
+        weights = [(r.get("agent",""), float(r.get("influence",0.0))*float(r.get("reliability",0.0))) 
+                  for r in valid]
         total_w = sum(w for _, w in weights) or 1.0
-        severity = sum(float(r.get("severity",0.0)) for r in valid)
 
         # Pull upstream details
         stress = 0.0; risk = 0.0; conflict = 0.0; timescale = 0.0

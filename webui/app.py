@@ -9,17 +9,11 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Add parent directory to Python path for sentinal imports
+# Add parent directory to Python path for imports
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if WORKSPACE_ROOT not in sys.path:
     sys.path.insert(0, WORKSPACE_ROOT)
     logger.info(f"Added workspace root to Python path: {WORKSPACE_ROOT}")
-
-# Add Aegis directory to Python path
-AEGIS_ROOT = os.path.join(WORKSPACE_ROOT, 'aegis2.0_patched', 'aegis2.0')
-if os.path.exists(AEGIS_ROOT) and AEGIS_ROOT not in sys.path:
-    sys.path.insert(0, AEGIS_ROOT)
-    logger.info(f"Added Aegis root to Python path: {AEGIS_ROOT}")
 
 # Import Flask components
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, abort
@@ -27,49 +21,38 @@ import json
 from webui.auth import bp as auth_bp
 from datetime import datetime, timedelta
 
-# Import Sentinel components
+# Import Aegis components
 try:
-    from sentinal.hoax_filter import HoaxFilter
-    from sentinal.ai_base import AIBase
-    logger.info("Successfully imported Sentinel components")
+    from aegis import (
+        Sentinel,
+        AegisCouncil,
+        MetaJudgeAgent,
+        NexusExplainStore
+    )
+    from aegis.sentinel_council import get_council
+    logger.info("Successfully imported Aegis components")
 except ImportError as e:
-    logger.error(f"Failed to import Sentinel components: {e}")
-    raise
-
-# Import Aegis components from the patched version
-AEGIS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'aegis2.0_patched', 'aegis2.0'))
-if not os.path.exists(AEGIS_ROOT):
-    raise RuntimeError(f"Aegis root path not found: {AEGIS_ROOT}")
-
-# Ensure Aegis path is in Python path
-if AEGIS_ROOT not in sys.path:
-    sys.path.insert(0, AEGIS_ROOT)
-    
-try:
-    from aegis_timescales import NexusMemory
-    from sentinel_council import get_council
-except ImportError as e:
-    print(f"Failed to import Aegis components: {e}")
-    print(f"Python path: {sys.path}")
+    logger.error(f"Failed to import Aegis components: {e}")
+    logger.error(f"Python path: {sys.path}")
     raise
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'devsecretkey')
 app.register_blueprint(auth_bp)
-hf = HoaxFilter()
-ai = AIBase()
 
-# Initialize Sentinel Council with persistence
+# Initialize Sentinel with persistence
 MEMORY_PATH = os.path.join(os.path.dirname(__file__), "data")  # Create a data directory
 os.makedirs(MEMORY_PATH, exist_ok=True)
-MEMORY_FILE = os.path.join(MEMORY_PATH, "sentinel_memory.json")
+MEMORY_FILE = os.path.join(MEMORY_PATH, "sentinel_memory.jsonl")
 DATASET_PATH = os.path.join(MEMORY_PATH, "user_interactions.jsonl")
 
 try:
-    council = get_council(persistence_path=MEMORY_FILE)
-    logger.info("Successfully initialized Sentinel Council")
+    # Initialize Sentinel with NexusExplainStore for persistence
+    explain_store = NexusExplainStore(persistence_path=MEMORY_FILE)
+    sentinel = Sentinel(explain_store=explain_store)
+    logger.info("Successfully initialized Sentinel")
 except Exception as e:
-    logger.error(f"Failed to initialize Sentinel Council: {e}")
+    logger.error(f"Failed to initialize Sentinel: {e}")
     raise
 
 def save_interaction(data):
@@ -99,47 +82,38 @@ def scan():
     file = request.files.get('file')
     if file:
         text = file.read().decode('utf-8')
-        
-    # Check with sentinel council first
-    council_input = {
-        "text": text,
-        "intent": "content scan",
-        "_signals": {
-            "bio": {"stress": 0.2},  # Lower default stress for scanning
-            "env": {"context_risk": 0.3}  # Lower default risk for scanning
-        }
-    }
-    council_out = council.dispatch(council_input)
-    meta_report = next((r for r in council_out.get("reports", []) if r.get("agent") == "MetaJudge"), {})
-    decision = meta_report.get("details", {}).get("decision", "BLOCK")
     
-    if decision == "BLOCK":
+    # Check with Sentinel first for safety
+    scan_model = request.form.get('scanModel', None)
+    context = {
+        'intent': 'content scan',
+        'model': scan_model or 'default',
+        'risk_level': 'low'  # Content scanning is lower risk
+    }
+
+    result = sentinel.check(text, context)
+    
+    if not result.allow:
         return jsonify({
-            'error': "Content scan blocked by sentinel council",
-            'council_report': council_out
+            'error': "Content scan blocked by Sentinel",
+            'reason': result.reason,
+            'severity': result.severity
         }), 403
     
-    # Proceed with scan if not blocked
-    scan_model = request.form.get('scanModel', None)
-    if scan_model:
-        custom_ai = AIBase(model_names=[os.path.join(os.path.dirname(__file__), scan_model) if os.path.isdir(os.path.join(os.path.dirname(__file__), scan_model) ) else scan_model])
-        ai_result = custom_ai.analyze(text)
-    else:
-        ai_result = ai.analyze(text)
-    result = hf.score(text)
+    # Content is safe, get detailed analysis
+    analysis = sentinel.analyze(text, context)
+    
     entry = {
         'type': 'scan',
         'user': text,
-        'ai': ai_result,
-        'result': result.verdict,
-        'council_decision': decision,
-        'council_report': council_out,
-        'red_flag_hits': result.red_flag_hits,
-        'source_score': result.source_score,
-        'scan_model': scan_model
+        'scan_model': scan_model,
+        'result': analysis,
+        'timestamp': datetime.now().isoformat()
     }
     chat_history.append(entry)
     save_interaction(entry)
+    
+    # Update analytics
     analytics_path = os.path.join(os.path.dirname(__file__), "analytics.json")
     try:
         if os.path.exists(analytics_path):
@@ -153,54 +127,48 @@ def scan():
         with open(analytics_path, "w", encoding="utf-8") as f:
             json.dump(analytics, f)
     except Exception as e:
-        print(f"Analytics error: {e}")
-    explanation = f"Model: {scan_model or 'default'} | Majority label: {ai_result[0]['label']} | Avg score: {ai_result[0]['score']:.2f}"
+        logger.error(f"Analytics error: {e}")
+        
+    explanation = f"Model: {scan_model or 'default'} | Risk Score: {analysis['risk_score']:.2f} | Confidence: {analysis['confidence']:.2f}"
+    
     return jsonify({
-        'ai_result': ai_result,
-        'red_flag_hits': result.red_flag_hits,
-        'source_score': result.source_score,
-        'verdict': result.verdict,
+        'analysis': analysis,
         'explanation': explanation,
         'chat_history': chat_history[-10:]
     })
 
 @app.route('/api/sentinel/status', methods=['GET'])
 def sentinel_status():
-    """Get the current status of the sentinel council."""
+    """Get the current status of the Sentinel system."""
     try:
-        # Get basic council info
-        agent_names = [a.__class__.__name__ for a in council.agents]
-        memory_size = len(council.memory.store) if hasattr(council.memory, 'store') else 0
+        # Get basic system info
+        status = sentinel.get_status()
         
-        # Try a simple decision to verify operation
-        test_input = {
-            "text": "status check",
-            "intent": "system check",
-            "_signals": {
-                "bio": {"stress": 0.0},
-                "env": {"context_risk": 0.0}
-            }
+        # Try a simple check to verify operation
+        test_context = {
+            'intent': 'system check',
+            'risk_level': 'low'
         }
-        out = council.dispatch(test_input)
+        result = sentinel.check('status check', test_context)
         
         return jsonify({
             "status": "ok",
-            "council": {
-                "agents": agent_names,
-                "agent_count": len(agent_names),
-                "memory_size": memory_size,
-                "memory_path": council.memory.persistence_path if hasattr(council.memory, 'persistence_path') else None
+            "system": {
+                "version": status['version'],
+                "explain_store": status['explain_store'],
+                "memory_size": status['memory_size'],
+                "persistence_path": status['persistence_path']
             },
             "health_check": {
-                "reports": len(out.get("reports", [])),
-                "has_reports": bool(out.get("reports")),
+                "allow": result.allow,
+                "severity": result.severity,
                 "last_check": datetime.now().isoformat()
             }
         })
     except Exception as e:
         logger.error(f"Status check failed: {e}")
         return jsonify({
-            "status": "error",
+            "status": "error", 
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }), 500
@@ -253,73 +221,43 @@ def sentinel_decide():
 
 @app.route('/api/sentinel/memory', methods=['GET'])
 def sentinel_memory():
-    """Get the current state of the sentinel memory with optional filtering."""
+    """Get the current state of the Sentinel's explain store with optional filtering."""
     try:
         # Get optional query parameters
         limit = request.args.get('limit', type=int)
-        agent = request.args.get('agent')
-        decision = request.args.get('decision')
         time_window = request.args.get('time_window', type=int)  # In minutes
         
-        # Get memory entries safely
-        entries = []
-        try:
-            if hasattr(council.memory, 'entries'):
-                entries = council.memory.entries
-            elif hasattr(council.memory, 'store'):
-                # Convert store dict to list format
-                entries = [
-                    {
-                        "id": key,
-                        "value": value.get("value"),
-                        "timestamp": value.get("timestamp"),
-                        "weight": value.get("weight", 1.0),
-                        "ttl": value.get("ttl")
-                    }
-                    for key, value in council.memory.store.items()
-                ]
-        except Exception as me:
-            logger.error(f"Memory access error: {me}")
-            entries = []
+        # Get entries from explain store
+        status = sentinel.get_status()
+        entries = sentinel.get_history(limit=limit)
         
-        # Apply filters
-        try:
-            if agent:
-                entries = [e for e in entries if any(r.get('agent') == agent for r in e.get('reports', []))]
-            if decision:
-                entries = [e for e in entries if any(r.get('details', {}).get('decision') == decision 
-                                                   for r in e.get('reports', []))]
-            if time_window:
-                cutoff = datetime.now() - timedelta(minutes=time_window)
-                entries = [
-                    e for e in entries 
-                    if isinstance(e.get('timestamp'), (str, datetime)) and 
-                    (datetime.fromisoformat(e['timestamp']) if isinstance(e['timestamp'], str) else e['timestamp']) > cutoff
-                ]
-            if limit and limit > 0:
-                entries = entries[-limit:]
-        except Exception as fe:
-            logger.error(f"Filter application error: {fe}")
+        # Apply time window filter if needed
+        if time_window:
+            cutoff = datetime.now() - timedelta(minutes=time_window)
+            entries = [
+                e for e in entries 
+                if isinstance(e.get('timestamp'), (str, datetime)) and 
+                (datetime.fromisoformat(e['timestamp']) if isinstance(e['timestamp'], str) else e['timestamp']) > cutoff
+            ]
         
         # Get memory stats
         stats = {
             "total_entries": len(entries),
-            "store_size": len(council.memory.store) if hasattr(council.memory, 'store') else 0,
-            "persistence_path": council.memory.persistence_path if hasattr(council.memory, 'persistence_path') else None
+            "store_size": status['memory_size'],
+            "persistence_path": status['persistence_path']
         }
         
         return jsonify({
             "status": "ok",
-            "memory": entries,
+            "history": entries,
             "stats": stats,
             "filters_applied": {
                 "limit": limit,
-                "agent": agent,
-                "decision": decision,
                 "time_window": time_window
             }
         })
     except Exception as e:
+        logger.error(f"Memory access error: {e}")
         return jsonify({
             "status": "error",
             "error": str(e)
@@ -330,46 +268,36 @@ def chat():
     text = request.form.get('text')
     chat_model = request.form.get('chatModel', None)
     
-    # Ask sentinel council for decision
-    council_input = {
-        "text": text,
-        "intent": "chat response",
-        "_signals": {
-            "bio": {"stress": 0.3},  # Default moderate stress for chat
-            "env": {"context_risk": 0.4}  # Default moderate risk for chat
-        }
+    # Check with Sentinel first for safety
+    context = {
+        'intent': 'chat response',
+        'model': chat_model or 'default',
+        'risk_level': 'medium'  # Chat has moderate risk level
     }
-    council_out = council.dispatch(council_input)
-    meta_report = next((r for r in council_out.get("reports", []) if r.get("agent") == "MetaJudge"), {})
-    decision = meta_report.get("details", {}).get("decision", "BLOCK")
     
-    if decision == "BLOCK":
+    result = sentinel.check(text, context)
+    
+    if not result.allow:
         return jsonify({
-            'error': "Request blocked by sentinel council",
-            'council_report': council_out
+            'error': "Chat request blocked by Sentinel",
+            'reason': result.reason,
+            'severity': result.severity
         }), 403
     
-    # Proceed with chat if not blocked
-    if chat_model:
-        custom_ai = AIBase(llm_names=[os.path.join(os.path.dirname(__file__), chat_model) if os.path.isdir(os.path.join(os.path.dirname(__file__), chat_model)) else chat_model])
-        ai_result = custom_ai.analyze(text)
-        llm_response = custom_ai.chat(text)
-    else:
-        ai_result = ai.analyze(text)
-        llm_response = ai.chat(text)
-        
-    result = hf.score(text)
+    # Get response from Sentinel
+    response = sentinel.respond(text, context)
+    
     entry = {
         'type': 'chat',
         'user': text,
-        'ai': ai_result,
-        'llm': llm_response,
-        'council_decision': decision,
-        'result': result.verdict,
-        'chat_model': chat_model
+        'response': response,
+        'chat_model': chat_model,
+        'timestamp': datetime.now().isoformat()
     }
     chat_history.append(entry)
     save_interaction(entry)
+    
+    # Update analytics
     analytics_path = os.path.join(os.path.dirname(__file__), "analytics.json")
     try:
         if os.path.exists(analytics_path):
@@ -383,8 +311,9 @@ def chat():
         with open(analytics_path, "w", encoding="utf-8") as f:
             json.dump(analytics, f)
     except Exception as e:
-        print(f"Analytics error: {e}")
-    explanation = f"Model: {chat_model or 'default'} | Majority label: {ai_result[0]['label']} | Avg score: {ai_result[0]['score']:.2f}"
+        logger.error(f"Analytics error: {e}")
+        
+    explanation = f"Model: {chat_model or 'default'} | Risk Score: {response['risk_score']:.2f} | Safety Level: {response['safety_level']}"
     return jsonify({'chat_history': chat_history[-10:], 'explanation': explanation})
 
 @app.route('/admin/dashboard')
@@ -402,20 +331,37 @@ def admin_users():
 def admin_batch():
     if request.method == 'GET':
         return render_template('batch_scan.html', user=session.get('user'))
+    
     data = request.get_json()
     texts = data.get('texts', [])
     model = data.get('model', None)
     results = []
+    
+    # Context for batch scanning
+    context = {
+        'intent': 'batch scan',
+        'model': model or 'default',
+        'risk_level': 'low'
+    }
+    
     for text in texts:
-        custom_ai = AIBase(model_names=[model], llm_names=[model])
-        scan_result = custom_ai.analyze(text)
-        chat_result = custom_ai.chat(text)
-        explanation = f"Model: {model} | Majority label: {scan_result[0]['label']} | Avg score: {scan_result[0]['score']:.2f}"
+        result = sentinel.check(text, context)
+        if result.allow:
+            analysis = sentinel.analyze(text, context)
+            response = sentinel.respond(text, context)
+            explanation = f"Model: {model or 'default'} | Risk Score: {analysis['risk_score']:.2f} | Safety: {analysis['safety_level']}"
+        else:
+            analysis = None
+            response = None
+            explanation = f"Blocked by Sentinel | Reason: {result.reason} | Severity: {result.severity:.2f}"
+            
         results.append({
-            'scan': scan_result,
-            'chat': chat_result,
+            'allowed': result.allow,
+            'analysis': analysis,
+            'response': response, 
             'explanation': explanation
         })
+        
     return jsonify({'results': results})
 
 @app.route('/admin/analytics_data')

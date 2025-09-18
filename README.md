@@ -1,53 +1,211 @@
-## Testing & Continuous Integration
+## 🧪 Testing
 
-Run the full test suite:
+Run all tests including integration tests:
 ```bash
-python -m pytest -v tests
+python -m pytest
 ```
 
-Run the smoke test only:
+Run specific test categories:
 ```bash
-python -m pytest -v tests/test_smoke.py
+# Unit tests only
+python -m pytest tests/unit/
+
+# Integration tests
+python -m pytest tests/integration/
+
+# Quick smoke test
+python -m pytest tests/test_smoke.py
 ```
 
-For CI, add these commands to your workflow to ensure all guardrails and council logic are validated before release.
-## Tamper-Evident Ledger & Integrity Verification
+## 🔍 Integrity Verification
 
-All system actions are logged to a tamper-evident ledger (JSONL) with HMAC signatures.
-To verify ledger integrity locally:
+All decisions are stored with HMAC signatures for tamper-evidence:
 
 ```bash
-python verify_ledger.py path/to/ledger.jsonl SECRET_KEY
+# Verify explain store integrity
+python -m aegis.tools.verify path/to/store.jsonl
+
+# Check specific time range
+python -m aegis.tools.verify --start="2025-01-01" --end="2025-09-18" path/to/store.jsonl
 ```
 
-This checks every entry for a valid HMAC signature using your secret key. If any entry fails, you'll see a mismatch warning.
+## 🌐 Web UI Integration
 
-**Best practices:**
-- Store your ledger securely and back it up regularly.
-- Never share your secret key publicly.
-- Use the verify script after any suspicious activity or before audits.
+The Aegis Web UI provides a user-friendly interface for:
+- Content safety scanning
+- Interactive chat with guardrails
+- Batch processing
+- Analytics dashboard
+- Feedback collection
+
+```bash
+# Install web dependencies
+pip install -r webui/requirements.txt
+
+# Run development server
+python -m webui.app
+```
+
+Visit http://localhost:5000 to access the interface.
+
+## ⚙️ Configuration
+
+Configure through `sentinel_config.py` or environment variables:
+
+```python
+# sentinel_config.py
+EXPLAIN_BACKEND = "jsonl"  # or "nexus"
+MAX_AGENT_TIMEOUT_SEC = 30
+ENABLE_PERSISTENCE = True
+```
+
+Environment variables override config file:
+- `AEGIS_EXPLAIN_BACKEND`: Storage backend ("jsonl" or "nexus")
+- `AEGIS_MAX_TIMEOUT`: Maximum agent response time
+- `AEGIS_ENABLE_PERSISTENCE`: Enable/disable explain store
+- `AEGIS_STORE_PATH`: Custom storage path
+
+## 🚀 Advanced Usage
+
+### Persistent Storage
+
+```python
+from aegis import Sentinel, NexusExplainStore
+
+# Initialize Nexus storage
+store = NexusExplainStore(
+    persistence_path="memory.db",
+    max_size=10000
+)
+
+# Create Sentinel with custom store
+sentinel = Sentinel(explain_store=store)
+```
+
+### Response Generation
+
+```python
+# Generate safe responses
+response = sentinel.respond(user_input, {
+    "intent": "chat",
+    "model": "gpt-4",
+    "risk_level": "medium"
+})
+
+print(response["text"])
+```
+
+### Batch Processing
+
+```python
+results = []
+for text in texts:
+    # Quick safety check
+    result = sentinel.check(text, {
+        "intent": "batch_scan",
+        "risk_level": "low"
+    })
+    
+    if result.allow:
+        # Full analysis if safe
+        analysis = sentinel.analyze(text)
+        results.append(analysis)
+```
+
+## 📜 License
+
+This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
+
+## 📚 Citation
+
+If you use Aegis in your research, please cite:
+
+```bibtex
+@software{aegis_guardrails,
+  title = {Aegis: Multi-Timescale AI Guardrails System},
+  version = {2.0.0},
+  year = {2025},
+  doi = {10.5281/zenodo.16853922},
+  url = {https://github.com/yourusername/aegis}
+}
+```
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests (`pytest`)
+5. Submit a pull request
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+## 💬 Support
+
+- 📘 [Documentation](docs/)
+- 🐛 [Issue Tracker](https://github.com/yourusername/aegis/issues)
+- 💭 [Discord Community](https://discord.gg/aegis)
+- 📧 [Email Support](mailto:support@aegis.ai)
 
 
 
-# Project SENTINAL
+# AEGIS: Multi-Timescale AI Guardrails System
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.16853922.svg)](https://doi.org/10.5281/zenodo.16853922)
 
-**AEGIS Sentinel** is a multi-timescale AI guardrails system for multi-agent governance and safety. Now with advanced LLM ensemble integration, role-based web UI, analytics dashboard, batch scan/chat, feedback labeling, export, and automated retraining/deployment.
+**AEGIS** is a comprehensive safety system that provides real-time guardrails for AI applications through multi-timescale analysis and persistent memory. Using a coordinated network of specialized agents, it offers robust protection across different time horizons while maintaining auditability and evolutionary learning.
 
-## Key Features
-- **Shield (pre-attack):** Rate limiting, proof-of-work, injection/Unicode anomaly guard, canaries & honeypots.
-- **Challenge Gate (pre-flight):** ChallengeBank for council validation; failed challenges are rejected.
-- **Meta-Arbitration (in-flight):** Fused risk, stress, conflict, and timescale analysis for `BLOCK / PROCEED_WITH_CAUTION / PROCEED` decisions.
-- **Tamper-Evident Ledger (post-flight):** HMAC-signed JSONL with full verification and rollback.
-- **Nexus Signal Engine:** Entropy-aware, arousal-weighted, time-decaying memory.
-- **Advanced LLM Ensemble:** Multiple open-source models for sentiment and chat, with majority vote and average scoring.
-- **Role-Based Web UI:** Admin/user login, admin-only features, and documentation panels.
-- **Admin Dashboard:** Model analytics, batch scan/chat, feedback labeling, export, retrain/deploy.
+## 🌟 Highlights
 
-## Installation
+- 🛡️ **Unified Sentinel Interface**: Simple, high-level API for safety operations
+- 🧠 **Multi-timescale Analysis**: From immediate validation to long-term patterns
+- 💾 **Flexible Persistence**: Pluggable explain stores (JSONL, Nexus)
+- 📊 **Rich Analytics**: Detailed safety metrics and explanations
+- 🔄 **Safety Evolution**: Continuous learning from past decisions
+
+## ⚡ Quick Start
+
+```python
+from aegis import Sentinel
+
+# Create a Sentinel instance
+sentinel = Sentinel()
+
+# Check if content is safe
+result = sentinel.check("Your text here", {
+    "intent": "scan",
+    "risk_level": "low"
+})
+
+if result.allow:
+    # Get detailed analysis
+    analysis = sentinel.analyze(text)
+    print(f"Risk Score: {analysis['risk_score']}")
+```
+
+## 🔒 Key Security Features
+
+- **Shield (Pre-Attack):** Rate limiting, proof-of-work, injection guards
+- **Validation (Pre-Flight):** Input sanitization and challenge validation
+- **Analysis (In-Flight):** Multi-agent risk and safety assessment 
+- **Audit (Post-Flight):** HMAC-signed JSONL with full verification
+- **Memory (Persistent):** Time-aware, weighted decision storage
+
+## 📚 Documentation
+
+- [API Reference](docs/API.md) - Detailed class and method documentation
+- [Examples](docs/EXAMPLES.md) - Common usage patterns and code samples
+- [Migration Guide](docs/MIGRATION.md) - Upgrading from older versions
+
+## 🛠️ Installation
 
 ```bash
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+
+# Install package
+pip install -e .
 pip install -r requirements.txt
 ```
 
