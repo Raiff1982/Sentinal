@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.0 — System Diagnostics & Monitoring
+- Added comprehensive diagnostics module for system health monitoring
+- Implemented real-time resource usage tracking (CPU, memory, disk)
+- Created interactive diagnostic dashboard in Web UI
+- Added component health monitoring for critical systems
+- Integrated security metrics and audit trail monitoring 
+- Implemented pre-flight system checks
+- Added API endpoints for diagnostic data
+- Enhanced system reliability with early warning detection
+
 ## 2.1.0 — Advanced LLM Ensemble & Web UI
 - Ensemble support for multiple LLMs (DistilBERT, RoBERTa, DistilGPT2, GPT2)
 - Sentiment analysis: majority vote, average score, all model outputs

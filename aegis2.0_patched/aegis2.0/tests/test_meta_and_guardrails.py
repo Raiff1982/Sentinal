@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from typing import Dict, Any
 
-from sentinel_council import get_council, DEFAULT_POLICIES
+from sentinel_council import get_council, DEFAULT_CONFIG
 from Sentinel import SignedLedger, ChallengeHarness, default_challenges
 
 def get_decision(bundle: Dict[str, Any]) -> str:
@@ -124,10 +124,10 @@ def test_memory_purge():
 
 def test_custom_policy_config():
     """Test that custom policy configuration is properly applied."""
-    custom_policies = DEFAULT_POLICIES.copy()
-    custom_policies["risk_cap"] = 0.5  # More conservative
+    custom_config = DEFAULT_CONFIG.copy()
+    custom_config["risk_threshold"] = 0.99
     
-    c = get_council(policies=custom_policies)
+    c = get_council(config=custom_config)
     inp = {
         "text": "proceed",
         "_signals": {

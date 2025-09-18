@@ -48,6 +48,15 @@ Configuration:
     - EXPLAIN_BACKEND: "jsonl" or "nexus"
     - MAX_AGENT_TIMEOUT_SEC: Maximum agent response time
     - ENABLE_PERSISTENCE: Enable/disable explain store
+
+Diagnostics:
+    The Sentinel includes built-in diagnostics for system monitoring:
+    
+    >>> diagnostics = sentinel.get_diagnostics()
+    >>> health = diagnostics.run_preflight_checks()
+    >>> if health.status == "healthy":
+    ...     metrics = diagnostics.collect_metrics()
+    ...     report = diagnostics.get_performance_report()
 """
 
 # Standard library

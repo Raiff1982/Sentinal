@@ -1,0 +1,378 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid">
+    <h1 class="mt-4">System Diagnostics Dashboard</h1>
+    
+    <!-- System Overview -->
+    <div class="row mt-4">
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">System Health</h5>
+                    <div class="health-status" id="overall-health">
+                        <div class="spinner-border" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Resource Usage</h5>
+                    <div class="resource-meters">
+                        <div class="progress mb-2">
+                            <div id="cpu-usage" class="progress-bar" role="progressbar" style="width: 0%" 
+                                 aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+                                CPU: 0%
+                            </div>
+                        </div>
+                        <div class="progress mb-2">
+                            <div id="memory-usage" class="progress-bar" role="progressbar" style="width: 0%" 
+                                 aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+                                Memory: 0%
+                            </div>
+                        </div>
+                        <div class="progress">
+                            <div id="disk-usage" class="progress-bar" role="progressbar" style="width: 0%" 
+                                 aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+                                Disk: 0%
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Active Warnings</h5>
+                    <div id="active-warnings" class="list-group">
+                        <div class="spinner-border" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Response Times</h5>
+                    <canvas id="response-times-chart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Component Health -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Component Health Status</h5>
+                    <div class="table-responsive">
+                        <table class="table" id="component-health">
+                            <thead>
+                                <tr>
+                                    <th>Component</th>
+                                    <th>Status</th>
+                                    <th>Risk Level</th>
+                                    <th>Last Check</th>
+                                    <th>Metrics</th>
+                                    <th>Warnings</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td colspan="6" class="text-center">
+                                        <div class="spinner-border" role="status">
+                                            <span class="visually-hidden">Loading...</span>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Security Metrics -->
+    <div class="row mt-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Security Events</h5>
+                    <canvas id="security-events-chart"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Audit Trail Health</h5>
+                    <div id="audit-health" class="audit-metrics">
+                        <div class="spinner-border" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+// Initialize charts
+let responseTimesChart = null;
+let securityEventsChart = null;
+
+function initCharts() {
+    // Response Times Chart
+    const rtCtx = document.getElementById('response-times-chart').getContext('2d');
+    responseTimesChart = new Chart(rtCtx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Response Time (ms)',
+                data: [],
+                borderColor: 'rgb(75, 192, 192)',
+                tension: 0.1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: {
+                    beginAtZero: true
+                }
+            }
+        }
+    });
+
+    // Security Events Chart
+    const seCtx = document.getElementById('security-events-chart').getContext('2d');
+    securityEventsChart = new Chart(seCtx, {
+        type: 'bar',
+        data: {
+            labels: ['Blocked', 'Warnings', 'Allowed'],
+            datasets: [{
+                label: 'Security Events',
+                data: [0, 0, 0],
+                backgroundColor: [
+                    'rgba(255, 99, 132, 0.5)',
+                    'rgba(255, 205, 86, 0.5)',
+                    'rgba(75, 192, 192, 0.5)'
+                ],
+                borderColor: [
+                    'rgb(255, 99, 132)',
+                    'rgb(255, 205, 86)',
+                    'rgb(75, 192, 192)'
+                ],
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: {
+                    beginAtZero: true
+                }
+            }
+        }
+    });
+}
+
+// Update dashboard with new metrics
+function updateDashboard(data) {
+    // Update resource usage
+    document.getElementById('cpu-usage').style.width = `${data.resources.cpu_percent}%`;
+    document.getElementById('cpu-usage').textContent = `CPU: ${data.resources.cpu_percent}%`;
+    
+    document.getElementById('memory-usage').style.width = `${data.resources.memory_percent}%`;
+    document.getElementById('memory-usage').textContent = `Memory: ${data.resources.memory_percent}%`;
+    
+    document.getElementById('disk-usage').style.width = `${data.resources.disk_usage}%`;
+    document.getElementById('disk-usage').textContent = `Disk: ${data.resources.disk_usage}%`;
+
+    // Update warnings
+    const warningsDiv = document.getElementById('active-warnings');
+    warningsDiv.innerHTML = '';
+    data.warnings.forEach(warning => {
+        warningsDiv.innerHTML += `
+            <div class="list-group-item list-group-item-warning">
+                ${warning}
+            </div>
+        `;
+    });
+
+    // Update component health table
+    const tableBody = document.getElementById('component-health').getElementsByTagName('tbody')[0];
+    tableBody.innerHTML = '';
+    Object.entries(data.components).forEach(([name, health]) => {
+        const row = tableBody.insertRow();
+        row.innerHTML = `
+            <td>${name}</td>
+            <td><span class="badge bg-${getStatusColor(health.status)}">${health.status}</span></td>
+            <td><span class="badge bg-${getRiskColor(health.risk_level)}">${health.risk_level}</span></td>
+            <td>${new Date(health.last_check).toLocaleString()}</td>
+            <td>${formatMetrics(health.metrics)}</td>
+            <td>${formatWarnings(health.warnings)}</td>
+        `;
+    });
+
+    // Update response times chart
+    if (responseTimesChart) {
+        const times = data.resources.response_times.slice(-10);
+        responseTimesChart.data.labels = times.map((_, i) => `${i + 1}`);
+        responseTimesChart.data.datasets[0].data = times;
+        responseTimesChart.update();
+    }
+
+    // Update security events chart
+    if (securityEventsChart && data.security) {
+        securityEventsChart.data.datasets[0].data = [
+            data.security.blocked_requests,
+            data.security.warnings,
+            data.security.allowed_requests
+        ];
+        securityEventsChart.update();
+    }
+
+    // Update audit health
+    const auditDiv = document.getElementById('audit-health');
+    if (data.audit) {
+        auditDiv.innerHTML = `
+            <div class="audit-stat">
+                <strong>Verified Entries:</strong> ${data.audit.verified_entries}/${data.audit.total_entries}
+            </div>
+            <div class="audit-stat">
+                <strong>Integrity Violations:</strong> ${data.audit.integrity_violations}
+            </div>
+            <div class="audit-stat">
+                <strong>Temporal Gaps:</strong> ${data.audit.gaps_detected}
+            </div>
+        `;
+    }
+
+    // Update overall health status
+    const healthDiv = document.getElementById('overall-health');
+    healthDiv.innerHTML = `
+        <div class="alert alert-${getOverallHealthColor(data)}">
+            ${getOverallHealthStatus(data)}
+        </div>
+    `;
+}
+
+// Helper functions
+function getStatusColor(status) {
+    switch (status.toLowerCase()) {
+        case 'healthy': return 'success';
+        case 'degraded': return 'warning';
+        case 'error': return 'danger';
+        default: return 'secondary';
+    }
+}
+
+function getRiskColor(risk) {
+    switch (risk.toLowerCase()) {
+        case 'low': return 'success';
+        case 'medium': return 'warning';
+        case 'high': return 'danger';
+        case 'critical': return 'dark';
+        default: return 'secondary';
+    }
+}
+
+function formatMetrics(metrics) {
+    return Object.entries(metrics)
+        .map(([key, value]) => `<div><strong>${key}:</strong> ${value}</div>`)
+        .join('');
+}
+
+function formatWarnings(warnings) {
+    return warnings.length > 0
+        ? warnings.map(w => `<div class="text-warning">${w}</div>`).join('')
+        : '<div class="text-success">No warnings</div>';
+}
+
+function getOverallHealthColor(data) {
+    if (Object.values(data.components).some(c => c.status === 'error')) return 'danger';
+    if (Object.values(data.components).some(c => c.status === 'degraded')) return 'warning';
+    return 'success';
+}
+
+function getOverallHealthStatus(data) {
+    if (Object.values(data.components).some(c => c.status === 'error')) {
+        return 'System Error - Immediate Attention Required';
+    }
+    if (Object.values(data.components).some(c => c.status === 'degraded')) {
+        return 'System Degraded - Maintenance Recommended';
+    }
+    return 'System Healthy - All Components Operational';
+}
+
+// Initialize dashboard
+document.addEventListener('DOMContentLoaded', function() {
+    initCharts();
+    
+    // Fetch initial data
+    fetch('/api/diagnostics')
+        .then(response => response.json())
+        .then(data => updateDashboard(data))
+        .catch(error => console.error('Error fetching diagnostic data:', error));
+    
+    // Set up polling for updates
+    setInterval(() => {
+        fetch('/api/diagnostics')
+            .then(response => response.json())
+            .then(data => updateDashboard(data))
+            .catch(error => console.error('Error fetching diagnostic data:', error));
+    }, 5000); // Update every 5 seconds
+});
+</script>
+
+<style>
+.health-status .alert {
+    margin-bottom: 0;
+}
+
+.resource-meters .progress {
+    height: 25px;
+}
+
+.resource-meters .progress-bar {
+    min-width: 2em;
+}
+
+.audit-metrics {
+    display: grid;
+    gap: 1rem;
+}
+
+.audit-stat {
+    padding: 0.5rem;
+    background-color: rgba(0,0,0,0.05);
+    border-radius: 0.25rem;
+}
+
+#response-times-chart,
+#security-events-chart {
+    height: 200px;
+}
+
+.component-health td {
+    vertical-align: middle;
+}
+</style>
+{% endblock %}

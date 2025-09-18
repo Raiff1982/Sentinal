@@ -26,3 +26,4 @@ abc  # Built-in
 collections  # Built-in
 typing  # Built-in
 click  # For playground CLI
+psutil  # For system resource monitoring

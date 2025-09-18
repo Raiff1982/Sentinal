@@ -50,10 +50,34 @@ try:
     # Initialize Sentinel with NexusExplainStore for persistence
     explain_store = NexusExplainStore(persistence_path=MEMORY_FILE)
     sentinel = Sentinel(explain_store=explain_store)
+    
+    # Initialize diagnostics
+    diagnostics = sentinel.get_diagnostics()
+    
+    # Run initial health check
+    health = diagnostics.run_preflight_checks()
+    if health.status != "healthy":
+        logger.warning(f"System health check: {health.status} - {health.message}")
+    else:
+        logger.info("System health check passed")
+    
     logger.info("Successfully initialized Sentinel")
 except Exception as e:
     logger.error(f"Failed to initialize Sentinel: {e}")
     raise
+
+# Start metrics collection in background
+def collect_metrics_loop():
+    while True:
+        try:
+            metrics = diagnostics.collect_metrics()
+            time.sleep(60)  # Collect every minute
+        except Exception as e:
+            logger.error(f"Metrics collection error: {e}")
+            time.sleep(60)
+
+metrics_thread = threading.Thread(target=collect_metrics_loop, daemon=True)
+metrics_thread.start()
 
 def save_interaction(data):
     with open(DATASET_PATH, "a", encoding="utf-8") as f:
@@ -74,6 +98,54 @@ def admin_required(f):
 def index():
     if 'user' not in session:
         return redirect(url_for('auth.login'))
+    return render_template('index.html')
+
+@app.route('/diagnostics')
+def show_diagnostics():
+    if 'user' not in session:
+        return redirect(url_for('auth.login'))
+    return render_template('diagnostics.html')
+
+# Diagnostics API endpoints
+@app.route('/api/diagnostics', methods=['GET'])
+def get_diagnostics_data():
+    try:
+        # Get resource metrics
+        resources = diagnostics.get_resource_metrics()
+        
+        # Get component health
+        components = diagnostics.check_critical_components()
+        
+        # Get active warnings
+        warnings = diagnostics.get_active_warnings()
+        
+        # Get security metrics
+        security = {
+            "blocked_requests": diagnostics.security_metrics.blocked_requests,
+            "warnings": len(diagnostics.security_metrics.recent_warnings),
+            "allowed_requests": diagnostics.security_metrics.allowed_requests
+        }
+        
+        # Get audit metrics from audit trail component health
+        audit = components.get("audit_trail", {}).get("metrics", {})
+        
+        return jsonify({
+            "resources": {
+                "cpu_percent": resources.cpu_percent,
+                "memory_percent": resources.memory_percent,
+                "disk_usage": resources.disk_usage,
+                "response_times": resources.response_times
+            },
+            "components": components,
+            "warnings": warnings,
+            "security": security,
+            "audit": audit
+        })
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "status": "error"
+        }), 500
     return render_template('index.html', user=session.get('user'))
 
 @app.route('/scan', methods=['POST'])
@@ -363,6 +435,49 @@ def admin_batch():
         })
         
     return jsonify({'results': results})
+
+@app.route('/api/sentinel/diagnostics/health', methods=['GET'])
+@admin_required
+def get_system_health():
+    """Get current system health status."""
+    try:
+        health = diagnostics.run_preflight_checks()
+        return jsonify({
+            "status": health.status,
+            "message": health.message,
+            "timestamp": health.timestamp,
+            "details": health.details
+        })
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+@app.route('/api/sentinel/diagnostics/metrics', methods=['GET'])
+@admin_required
+def get_system_metrics():
+    """Get current system metrics."""
+    try:
+        metrics = diagnostics.collect_metrics()
+        report = diagnostics.get_performance_report()
+        return jsonify({
+            "current_metrics": {
+                "cpu_percent": metrics.cpu_percent,
+                "memory_percent": metrics.memory_percent,
+                "disk_usage": metrics.disk_usage,
+                "explain_store_size": metrics.explain_store_size,
+                "active_threads": metrics.active_threads,
+                "response_times": metrics.response_times
+            },
+            "performance_report": report
+        })
+    except Exception as e:
+        logger.error(f"Metrics collection failed: {e}")
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 @app.route('/admin/analytics_data')
 @admin_required

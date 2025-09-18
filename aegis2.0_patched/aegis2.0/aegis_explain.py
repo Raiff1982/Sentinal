@@ -7,6 +7,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple, TypedDict, Union
+import statistics
 
 import numpy as np
 
@@ -343,7 +344,7 @@ class ExplainStore:
         start = end - timedelta(hours=hours)
         return self._load_between(start, end)
         self._prune_old_files()
-    path = self._path_for_date(datetime.now(timezone.utc))
+        path = self._path_for_date(datetime.now(timezone.utc))
         try:
             with portalocker.Lock(path, "a", timeout=5) as f:
                 f.write(snap.to_json() + "\n")
@@ -376,7 +377,7 @@ class ExplainStore:
     def window(self, hours: int) -> List[ExplainSnapshot]:
         if hours < 0:
             raise ValueError("Hours must be non-negative")
-    end = datetime.now(timezone.utc)
+        end = datetime.now(timezone.utc)
         start = end - timedelta(hours=hours)
         return self._load_between(start, end)
 

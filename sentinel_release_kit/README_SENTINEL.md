@@ -18,6 +18,12 @@ A multi-timescale AI guardrails system for misinformation detection and filterin
 - SQLite-based memory and FTS5 search
 - NLTK, rapidfuzz, numpy, filelock integration
 - Extensible signal engine
+- Comprehensive System Diagnostics
+  - Real-time resource monitoring (CPU, memory, disk)
+  - Component health tracking
+  - Security metrics and audit trail
+  - Interactive diagnostic dashboard
+  - Pre-flight system checks
 
 ## Quickstart
 ```bash
