@@ -81,6 +81,80 @@ class TestNexusMemory(unittest.TestCase):
         # Should have same entries
         self.assertEqual(new_memory.get("persist1"), "value1")
         self.assertEqual(new_memory.get("persist2"), {"nested": "value2"})
+        
+    def test_entropy_calculation(self):
+        """Test entropy calculation for different types of values."""
+        # Test string entropy
+        self.memory.set("str_uniform", "aaaa")  # Low entropy
+        self.memory.set("str_varied", "ab!2@Zx")  # Higher entropy
+        
+        store = self.memory.audit()
+        self.assertLess(store["str_uniform"]["entropy"], store["str_varied"]["entropy"])
+        
+        # Test JSON entropy
+        self.memory.set("json_simple", {"a": 1})
+        self.memory.set("json_complex", {"a": [1,2,3], "b": {"c": True, "d": None}})
+        
+        store = self.memory.audit()
+        self.assertLess(store["json_simple"]["entropy"], store["json_complex"]["entropy"])
+        
+    def test_integrity_maintenance(self):
+        """Test memory integrity maintenance over operations."""
+        # Initial state
+        self.memory.set("test_key", "initial")
+        initial_audit = self.memory.audit()
+        
+        # Modify value
+        self.memory.set("test_key", "modified")
+        modified_audit = self.memory.audit()
+        
+        # Check timestamps updated
+        self.assertGreater(
+            modified_audit["test_key"]["timestamp"],
+            initial_audit["test_key"]["timestamp"]
+        )
+        
+        # Check entropy tracked
+        self.assertIn("entropy", modified_audit["test_key"])
+        
+        # Test entry expiration
+        self.memory.set("expire_soon", "value", ttl=1)
+        pre_expire = self.memory.audit()
+        self.assertIn("expire_soon", pre_expire)
+        
+        import time
+        time.sleep(1.1)
+        
+        post_expire = self.memory.audit()
+        self.assertNotIn("expire_soon", post_expire)
+        
+    def test_concurrent_access(self):
+        """Test thread-safe operations."""
+        import threading
+        import random
+        
+        def worker():
+            for _ in range(100):
+                key = f"key_{random.randint(1, 10)}"
+                value = str(random.randint(1, 1000))
+                self.memory.set(key, value)
+                _ = self.memory.get(key)
+                _ = self.memory.audit()
+                
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+            
+        # Verify no data corruption
+        audit = self.memory.audit()
+        for key, entry in audit.items():
+            self.assertIsInstance(entry["value"], str)
+            self.assertIsInstance(entry["timestamp"], datetime)
+            self.assertIsInstance(entry["entropy"], float)
+            self.assertGreaterEqual(entry["entropy"], 0.0)
+            self.assertLessEqual(entry["entropy"], 1.0)
 
 class TestInputSanitizer(unittest.TestCase):
     """Test the InputSanitizer class functionality."""
@@ -135,6 +209,90 @@ class TestInputSanitizer(unittest.TestCase):
         result = self.sanitizer.audit_text(invalid_url)
         self.assertFalse(result["safe"])
         self.assertIn("disallowed_scheme:javascript", "".join(result["issues"]))
+        
+        # Test with custom trusted domains
+        sanitizer = InputSanitizer({
+            "trusted_domains": ["trusted.example.com"]
+        })
+        
+        result = sanitizer.audit_text("Check https://trusted.example.com")
+        self.assertTrue(result["safe"])
+        
+        result = sanitizer.audit_text("Check https://untrusted.example.com")
+        self.assertIn("untrusted_domain:untrusted.example.com", "".join(result["warnings"]))
+        
+    def test_json_structure_validation(self):
+        """Test JSON structure validation."""
+        # Test field length
+        long_field = "x" * (self.sanitizer.max_field_length + 1)
+        json_data = json.dumps({long_field: "value"})
+        result = self.sanitizer.audit_text(json_data)
+        self.assertIn("field_name_too_long", "".join(result["issues"]))
+        
+        # Test nested depth
+        deep_json = {}
+        current = deep_json
+        for i in range(self.sanitizer.max_depth + 2):
+            current["nested"] = {}
+            current = current["nested"]
+            
+        result = self.sanitizer.audit_text(json.dumps(deep_json))
+        self.assertIn("max_depth_exceeded", "".join(result["warnings"]))
+        
+        # Test mixed content types
+        mixed_json = {
+            "str": "text",
+            "num": 123,
+            "bool": True,
+            "null": None,
+            "arr": [1, "two", {"three": 3}],
+            "obj": {"nested": {"deep": ["value"]}}
+        }
+        result = self.sanitizer.audit_text(json.dumps(mixed_json))
+        self.assertTrue(result["safe"])
+        
+    def test_control_character_detection(self):
+        """Test control character detection."""
+        # Test various control characters
+        for i in range(0x20):
+            if i in {0x09, 0x0A, 0x0D}:  # Skip allowed characters
+                continue
+            text = f"Test{chr(i)}text"
+            result = self.sanitizer.audit_text(text)
+            self.assertFalse(result["safe"])
+            self.assertTrue(
+                any(f"control_chars_detected" in issue for issue in result["issues"]),
+                f"Control char 0x{i:02x} not detected"
+            )
+            
+        # Test mixed control characters
+        mixed = "Test\x00with\x1Fmultiple\x02controls"
+        result = self.sanitizer.audit_text(mixed)
+        self.assertFalse(result["safe"])
+        detected = "".join(result["issues"])
+        self.assertIn("0x0", detected)
+        self.assertIn("0x1f", detected.lower())
+        self.assertIn("0x2", detected)
+        
+    def test_suspicious_content_detection(self):
+        """Test detection of suspicious content."""
+        suspicious_inputs = [
+            ("<script>alert(1)</script>", "potential_xss_detected"),
+            ("onerror=alert(1)", "potential_xss_detected"),
+            ("rm -rf /", "suspicious_commands_detected"),
+            ("'; DROP TABLE users;--", None),  # Should be normalized
+            ("data:text/html,<script>", "disallowed_scheme:data"),
+            ("vbscript:msgbox(1)", "disallowed_scheme:vbscript")
+        ]
+        
+        for input_text, expected_issue in suspicious_inputs:
+            result = self.sanitizer.audit_text(input_text)
+            if expected_issue:
+                self.assertTrue(
+                    any(expected_issue in issue for issue in result["issues"]),
+                    f"Failed to detect {expected_issue} in '{input_text}'"
+                )
+            self.assertTrue("normalized" in result)
 
 class TestAegisTimescales(unittest.TestCase):
     """Test the AegisTimescales class functionality."""
@@ -219,6 +377,120 @@ class TestAegisTimescales(unittest.TestCase):
         
         # Should take maximum of all stress signals
         self.assertEqual(self.timescales._stress, 0.8)
+        
+    def test_policy_deep_merge(self):
+        """Test deep merging of policy configurations."""
+        base_policy = {
+            "thresholds": {
+                "risk_block": 0.8,
+                "nested": {"value": 1}
+            },
+            "weights": {"risk": 1.0}
+        }
+        
+        update_policy = {
+            "thresholds": {
+                "risk_block": 0.9,
+                "nested": {"new_value": 2}
+            },
+            "new_section": {"key": "value"}
+        }
+        
+        self.timescales._deep_merge(base_policy, update_policy)
+        
+        self.assertEqual(base_policy["thresholds"]["risk_block"], 0.9)
+        self.assertEqual(base_policy["thresholds"]["nested"]["value"], 1)
+        self.assertEqual(base_policy["thresholds"]["nested"]["new_value"], 2)
+        self.assertEqual(base_policy["new_section"]["key"], "value")
+        self.assertEqual(base_policy["weights"]["risk"], 1.0)
+        
+    def test_custom_policy_thresholds(self):
+        """Test application of custom policy thresholds."""
+        # Create custom policy
+        policy = {
+            "thresholds": {
+                "risk_block": 0.75,
+                "risk_caution": 0.45,
+                "severity_block": 0.85,
+                "severity_caution": 0.55,
+                "stress_block": 0.95,
+                "stress_caution": 0.65
+            }
+        }
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+            
+        # Create agent with high risk
+        class RiskAgent(BaseAgent):
+            def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+                return {
+                    "agent": self.name,
+                    "details": {"risk": 0.7},
+                    "ok": True
+                }
+                
+        # Test with risk above caution but below block
+        memory = NexusMemory()
+        agent = RiskAgent("risk", memory)
+        self.timescales.add_agent("risk", agent)
+        
+        result = self.timescales.dispatch({"test": "data"})
+        self.assertEqual(result["decision"], "CAUTION")
+        
+        # Test with severity above block
+        class SeverityAgent(BaseAgent):
+            def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+                return {
+                    "agent": self.name,
+                    "details": {"severity": 0.9},
+                    "ok": True
+                }
+                
+        self.timescales.add_agent("severity", SeverityAgent("severity", memory))
+        result = self.timescales.dispatch({"test": "data"})
+        self.assertEqual(result["decision"], "BLOCK")
+        
+    def test_weighted_metrics(self):
+        """Test weighted metric calculations."""
+        policy = {
+            "weights": {
+                "risk": 2.0,
+                "severity": 0.5,
+                "stress": 1.5
+            }
+        }
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+            
+        # Create test agent
+        class MetricAgent(BaseAgent):
+            def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+                return {
+                    "agent": self.name,
+                    "details": {
+                        "risk": 0.4,
+                        "severity": 0.8,
+                        "stress": 0.6
+                    },
+                    "ok": True
+                }
+                
+        memory = NexusMemory()
+        agent = MetricAgent("metrics", memory)
+        self.timescales.add_agent("metrics", agent)
+        
+        result = self.timescales.dispatch({"test": "data"})
+        loaded_policy = self.timescales._load_policy()
+        
+        # Verify weighted values are used in decision
+        self.assertEqual(
+            self.timescales._risk,
+            0.4 * loaded_policy["weights"]["risk"]
+        )
+        self.assertEqual(
+            self.timescales._severity,
+            0.8 * loaded_policy["weights"]["severity"]
+        )
 
 class TestEndToEnd(unittest.TestCase):
     """End-to-end integration tests."""
