@@ -38,3 +38,9 @@ aegis_sentinel_zenodo_package.zip
 .env.*
 secrets.*
 Secrets.*
+# secrets
+*.key
+*.pem
+*.crt
+.env
+.env.*
